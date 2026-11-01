@@ -1,5 +1,6 @@
 use super::{ResolutionError, valid_token};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use reqwest::Url;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -415,7 +416,7 @@ pub(super) fn decode(
     if response.version != 1
         || connection.api_format != expected_format
         || !provider.supports(connection.api_format)
-        || connection.base_url != provider.official_origin()
+        || !valid_connection_origin(&connection.base_url)
         || !provider.accepts(connection.credential())
         || !valid_token(connection.credential().secret())
         || !valid_ingestion(&response, now)
@@ -434,4 +435,18 @@ pub(super) fn decode(
         return Err(ResolutionError::InvalidResponse);
     }
     Ok(ResolvedRequestContext(response))
+}
+
+/// The origin Web vouches for must be a syntactic http or https origin with no
+/// extras; reachability is enforced at connect time by the egress policy.
+fn valid_connection_origin(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url) else {
+        return false;
+    };
+    (url.scheme() == "https" || url.scheme() == "http")
+        && url.host_str().is_some_and(|host| !host.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
