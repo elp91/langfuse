@@ -122,69 +122,81 @@ function ConnectedGatewayAliasesTable({
     {
       accessorKey: "targets",
       header: "Targets",
-      cell: ({ row }) => (
-        <div className="flex flex-col items-start gap-1.5">
-          {row.original.targets.map((target, index) => {
-            const ProviderIcon = providerIcons[target.connectionProvider];
-            /** A target serves only through a healthy connection; the badge
-             * colour tells whether the fallback chain stops here or skips. */
-            const badgeColor =
-              target.connectionStatus === "ENABLED"
-                ? "green"
-                : target.connectionStatus === "DISABLED"
-                  ? "yellow"
-                  : "red";
-            const statusHint =
-              target.connectionStatus === "ENABLED"
-                ? "will serve requests"
-                : target.connectionStatus === "DISABLED"
-                  ? "is disabled; requests fall through to the next target"
-                  : "errored; requests fall through to the next target";
-            return (
-              <span
-                key={target.id}
-                className="flex flex-col items-start gap-0.5"
-              >
-                <Tooltip
-                  label={`Target ${index + 1} — ${target.connectionName} ${statusHint}`}
+      cell: ({ row }) => {
+        /** Position of the first target whose connection will serve. */
+        const firstHealthyIndex = row.original.targets.findIndex(
+          (candidate) => candidate.connectionStatus === "ENABLED",
+        );
+        return (
+          <div className="flex flex-col items-start gap-1.5">
+            {row.original.targets.map((target, index) => {
+              const ProviderIcon = providerIcons[target.connectionProvider];
+              /** Only a target that can actually serve needs attention: the
+               * first healthy one is green; everything after it is grey until
+               * the targets above it fail. Errored and disabled connections
+               * are highlighted because they will not serve. */
+              const badgeColor =
+                target.connectionStatus !== "ENABLED"
+                  ? target.connectionStatus === "DISABLED"
+                    ? "yellow"
+                    : "red"
+                  : index === firstHealthyIndex
+                    ? "green"
+                    : "filled";
+              const statusHint =
+                target.connectionStatus === "ENABLED"
+                  ? index === firstHealthyIndex
+                    ? "will serve requests"
+                    : "serves only when the targets above it fail"
+                  : target.connectionStatus === "DISABLED"
+                    ? "is disabled; requests fall through to the next target"
+                    : "errored; requests fall through to the next target";
+              return (
+                <span
+                  key={target.id}
+                  className="flex flex-col items-start gap-0.5"
                 >
-                  {({ getTriggerProps }) => (
-                    <span
-                      {...getTriggerProps()}
-                      tabIndex={0}
-                      className="focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-hidden"
-                    >
-                      <BadgeShell color={badgeColor}>
-                        <ProviderIcon aria-hidden size="sm" />
-                        <span
-                          className="truncate py-0.5"
-                          title={target.connectionName}
-                        >
-                          {target.connectionName}
-                        </span>
-                        <span className="text-muted-foreground">·</span>
-                        <span className="font-mono text-xs">
-                          {target.providerModel}
-                        </span>
-                      </BadgeShell>
-                    </span>
-                  )}
-                </Tooltip>
-                {/** Targets stack in fallback order; the arrow points from
-                 * each badge down to the next one. */}
-                {index < row.original.targets.length - 1 ? (
-                  <span
-                    aria-hidden
-                    className="text-muted-foreground ml-4 text-xs leading-none"
+                  <Tooltip
+                    label={`Target ${index + 1}: ${target.connectionName} ${statusHint}`}
                   >
-                    ↓
-                  </span>
-                ) : null}
-              </span>
-            );
-          })}
-        </div>
-      ),
+                    {({ getTriggerProps }) => (
+                      <span
+                        {...getTriggerProps()}
+                        tabIndex={0}
+                        className="focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-hidden"
+                      >
+                        <BadgeShell color={badgeColor}>
+                          <ProviderIcon aria-hidden size="sm" />
+                          <span
+                            className="truncate py-0.5"
+                            title={target.connectionName}
+                          >
+                            {target.connectionName}
+                          </span>
+                          <span className="text-muted-foreground">·</span>
+                          <span className="font-mono text-xs">
+                            {target.providerModel}
+                          </span>
+                        </BadgeShell>
+                      </span>
+                    )}
+                  </Tooltip>
+                  {/** Targets stack in fallback order; the arrow points from
+                   * each badge down to the next one. */}
+                  {index < row.original.targets.length - 1 ? (
+                    <span
+                      aria-hidden
+                      className="text-muted-foreground ml-4 text-xs leading-none"
+                    >
+                      ↓
+                    </span>
+                  ) : null}
+                </span>
+              );
+            })}
+          </div>
+        );
+      },
       enableResizing: false,
     },
   ];
