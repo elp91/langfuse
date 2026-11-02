@@ -10,9 +10,11 @@ import { SettingsTable } from "@/src/components/SettingsTable/SettingsTable";
 import type { LangfuseColumnDef } from "@/src/components/table/types";
 import { Button } from "@/src/components/ui/button";
 import { Skeleton } from "@/src/components/ui/skeleton";
+import { BadgeShell } from "@/src/components/design-system/Badge/Badge";
 import { AliasDialogController } from "@/src/features/ai-gateway/components/GatewayAliasesPage/components/AliasDialogController";
 import { GatewayNotDeployedNotice } from "@/src/features/ai-gateway/components/GatewayNotDeployedNotice/GatewayNotDeployedNotice";
 import { GatewaySetupEmptyState } from "@/src/features/ai-gateway/components/GatewaySetupEmptyState/GatewaySetupEmptyState";
+import { providerIcons } from "@/src/features/ai-gateway/constants/providerIcons";
 import { useGatewaySettingsAccess } from "@/src/features/ai-gateway/hooks/useGatewaySettingsAccess";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { api, type RouterOutputs } from "@/src/utils/api";
@@ -116,15 +118,44 @@ function ConnectedGatewayAliasesTable({
       getStatus: (value) => (value === "ENABLED" ? "active" : "inactive"),
       enableResizing: false,
     }),
-    createTextTableColumn<GatewayAliasRow>({
-      id: "targets",
+    {
+      accessorKey: "targets",
       header: "Targets",
-      accessorFn: (row) =>
-        row.targets
-          .map((target) => `${target.connectionName} → ${target.providerModel}`)
-          .join(" → "),
+      cell: ({ row }) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {row.original.targets.map((target, index) => {
+            const ProviderIcon = providerIcons[target.connectionProvider];
+            return (
+              <span
+                key={target.id}
+                className="inline-flex items-center gap-1.5"
+              >
+                {index > 0 ? (
+                  <span className="text-muted-foreground text-xs">→</span>
+                ) : null}
+                <BadgeShell
+                  color="filled"
+                  aria-label={`Target ${index + 1}: ${target.connectionName}, upstream model ${target.providerModel}`}
+                >
+                  <ProviderIcon aria-hidden size="sm" />
+                  <span
+                    className="truncate py-0.5"
+                    title={target.connectionName}
+                  >
+                    {target.connectionName}
+                  </span>
+                  <span className="text-muted-foreground">·</span>
+                  <span className="font-mono text-xs">
+                    {target.providerModel}
+                  </span>
+                </BadgeShell>
+              </span>
+            );
+          })}
+        </div>
+      ),
       enableResizing: false,
-    }),
+    },
   ];
 
   const toggleStatus = async (alias: GatewayAliasRow) => {

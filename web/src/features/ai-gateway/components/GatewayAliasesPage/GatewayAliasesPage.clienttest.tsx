@@ -17,6 +17,7 @@ const aliases = [
         id: "t-1",
         connectionId: "conn-1",
         connectionName: "OpenAI",
+        connectionProvider: "OPENAI" as const,
         providerModel: "gpt-4.1",
         position: 0,
       },
@@ -31,6 +32,7 @@ const connections = [
     provider: "OPENAI",
     allowedModels: [],
     supportedRoutes: [],
+    models: [],
   },
   {
     id: "conn-2",
@@ -38,6 +40,7 @@ const connections = [
     provider: "ANTHROPIC",
     allowedModels: [],
     supportedRoutes: [],
+    models: [],
   },
 ];
 
@@ -140,7 +143,7 @@ describe("GatewayAliasesPage alias dialog", () => {
     fireEvent.click(
       screen.getByRole("combobox", { name: "Target 1 connection" }),
     );
-    fireEvent.click(await screen.findByText("OpenAI"));
+    fireEvent.click((await screen.findAllByText("OpenAI")).at(-1)!);
     fireEvent.change(screen.getByLabelText("Target 1 model"), {
       target: { value: "claude-sonnet-4" },
     });
@@ -148,7 +151,7 @@ describe("GatewayAliasesPage alias dialog", () => {
     fireEvent.click(
       screen.getByRole("combobox", { name: "Target 2 connection" }),
     );
-    fireEvent.click(await screen.findByText("Anthropic"));
+    fireEvent.click((await screen.findAllByText("Anthropic")).at(-1)!);
     fireEvent.change(screen.getByLabelText("Target 2 model"), {
       target: { value: "claude-haiku-4" },
     });

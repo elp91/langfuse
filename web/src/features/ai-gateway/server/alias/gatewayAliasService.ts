@@ -33,18 +33,24 @@ export const upsertAliasInputSchema = z.object({
 
 export type UpsertAliasInput = z.infer<typeof upsertAliasInputSchema>;
 
+import type { GatewayProvider } from "@/src/features/ai-gateway/types/gatewayProvider";
+
+/** Ordered upstream target of an alias; position is the fallback order. */
+export type GatewayAliasTargetDto = {
+  id: string;
+  connectionId: string;
+  connectionName: string;
+  connectionProvider: GatewayProvider;
+  providerModel: string;
+  position: number;
+};
+
 export type GatewayAliasDto = {
   id: string;
   name: string;
   status: "ENABLED" | "DISABLED";
   updatedAt: Date;
-  targets: {
-    id: string;
-    connectionId: string;
-    connectionName: string;
-    providerModel: string;
-    position: number;
-  }[];
+  targets: GatewayAliasTargetDto[];
 };
 
 /**
@@ -72,7 +78,7 @@ export class GatewayAliasService {
             connectionId: true,
             providerModel: true,
             position: true,
-            connection: { select: { name: true } },
+            connection: { select: { name: true, provider: true } },
           },
         },
       },
@@ -86,6 +92,7 @@ export class GatewayAliasService {
         id: target.id,
         connectionId: target.connectionId,
         connectionName: target.connection.name,
+        connectionProvider: target.connection.provider,
         providerModel: target.providerModel,
         position: target.position,
       })),
