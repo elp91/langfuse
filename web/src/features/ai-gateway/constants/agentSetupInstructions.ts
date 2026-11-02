@@ -2,6 +2,11 @@ import { GATEWAY_DOCS_URL } from "./gatewayDocsUrls";
 
 export const GATEWAY_KEY_PLACEHOLDER = "<your-gateway-key>";
 
+/** A model alias name when the organization has one, else the raw placeholder. */
+export function gatewayModelPlaceholder(aliases: string[]): string {
+  return aliases[0] ?? "<model>";
+}
+
 export const AGENT_SETUP_DOCS_URLS = {
   api: `${GATEWAY_DOCS_URL}/get-started`,
   "claude-desktop": `${GATEWAY_DOCS_URL}/coding-agents/claude-code#claude-desktop`,

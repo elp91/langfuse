@@ -572,11 +572,11 @@ async function seedAiGateway(params: {
     },
   });
 
-  if (
+  const hasGatewayConnections =
     (await prisma.gatewayAiConnection.count({
       where: { organizationId: params.organizationId },
-    })) === 0
-  ) {
+    })) > 0;
+  if (!hasGatewayConnections) {
     await prisma.gatewayAiConnection.createMany({
       data: [
         {
@@ -641,6 +641,39 @@ async function seedAiGateway(params: {
     },
     update: {},
   });
+
+  if (
+    hasGatewayConnections &&
+    (await prisma.gatewayAiAlias.count({
+      where: { organizationId: params.organizationId },
+    })) === 0
+  ) {
+    // Fallback order mirrors the stack plan: OpenAI first, custom vLLM as
+    // the second hop. Credentials are deliberately invalid; the alias UI
+    // and resolve routing do not need working upstreams.
+    await prisma.gatewayAiAlias.create({
+      data: {
+        id: "seed-gateway-alias-glm",
+        organizationId: params.organizationId,
+        name: "glm-5.3",
+        status: "ENABLED",
+        targets: {
+          create: [
+            {
+              connectionId: "seed-gateway-openai",
+              providerModel: "GLM-5.3",
+              position: 0,
+            },
+            {
+              connectionId: "seed-gateway-custom",
+              providerModel: "GLM-5.3",
+              position: 1,
+            },
+          ],
+        },
+      },
+    });
+  }
 }
 
 async function createDashboardsAndWidgets(projects: Project[]) {

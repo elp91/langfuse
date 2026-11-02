@@ -56,6 +56,18 @@ export class GatewayResolveRepository {
                 allowedModels: true,
               },
             },
+            gatewayAiAliases: {
+              where: { status: "ENABLED" },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+              select: {
+                name: true,
+                status: true,
+                targets: {
+                  orderBy: [{ position: "asc" }],
+                  select: { connectionId: true, providerModel: true },
+                },
+              },
+            },
           },
         },
       },

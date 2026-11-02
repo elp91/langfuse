@@ -6,6 +6,8 @@ export type AgentSetupContext = {
   gatewayOrigin: string;
   /** Providers with an enabled connection in the organization. */
   providers: GatewayProvider[];
+  /** Enabled model aliases; a client can use one as the model name. */
+  aliases: string[];
 };
 
 export type AgentSetupStep = {

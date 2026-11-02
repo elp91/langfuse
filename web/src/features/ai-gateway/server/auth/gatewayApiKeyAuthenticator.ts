@@ -57,12 +57,17 @@ export class GatewayApiKeyAuthenticator {
     const route = this.modelRoutingService.resolve(
       params.model,
       context.connections,
+      context.aliases,
     );
     if (!route) {
       throw new GatewayControlPlaneError("Invalid gateway model", 400);
     }
+    // An alias target names its upstream model explicitly, so the alias is
+    // the allowlist decision; only slug and implicit routing consult
+    // allowedModels.
     if (
       route.connection &&
+      !route.viaAlias &&
       !isGatewayModelAllowed(
         route.connection.allowedModels,
         route.providerModel,
@@ -161,6 +166,14 @@ export class GatewayApiKeyAuthenticator {
       connections: organization.gatewayAiConnections.map((connection) => ({
         ...connection,
         allowedModels: parseGatewayAllowedModels(connection.allowedModels),
+      })),
+      aliases: organization.gatewayAiAliases.map((alias) => ({
+        name: alias.name,
+        status: alias.status,
+        targets: alias.targets.map((target) => ({
+          connectionId: target.connectionId,
+          providerModel: target.providerModel,
+        })),
       })),
     };
 

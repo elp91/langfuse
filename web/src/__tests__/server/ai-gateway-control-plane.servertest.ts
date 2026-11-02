@@ -424,6 +424,7 @@ describe("AI gateway control plane", () => {
     expect(setup).toEqual({
       gatewayBaseUrl: expect.any(String),
       providers: ["OPENAI"],
+      aliases: [],
     });
     await expect(
       viewer.aiGateway.getClientSetup({ orgId: owner.org.id }),
@@ -896,6 +897,7 @@ describe("AI gateway control plane", () => {
           provider: "OPENAI",
           allowedModels: ["enabled-model"],
           supportedRoutes: null,
+          models: [],
         },
       ]);
       await expect(
@@ -1248,6 +1250,7 @@ describe("AI gateway control plane", () => {
         provider: "OPENAI",
         allowedModels: null,
         supportedRoutes: null,
+        models: [],
       },
     ]);
 
@@ -2323,6 +2326,61 @@ describe("AI gateway control plane", () => {
     ).resolves.toEqual({ status: "DISABLED" });
   });
 
+  it("demotes enabled connections on structural catalog failures but keeps them through timeouts", async () => {
+    const { caller, org } = await prepare();
+    // The private base URL must pass validateLlmConnectionBaseURL; the
+    // whitelist env is machine-dependent, so the test pins it.
+    const originalSegments =
+      env.LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS;
+    Object.assign(env, {
+      LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS: ["10.0.0.0/8"],
+    });
+    const create = (name: string) =>
+      caller.aiGateway.createConnection({
+        orgId: org.id,
+        name,
+        provider: "CUSTOM",
+        baseUrl: "http://10.0.0.1/v1",
+        credential: "",
+      });
+    const broken = await create("broken-host");
+    const slow = await create("slow-host");
+
+    const notFoundFetch = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response("Not found.", {
+        status: 404,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    await new GatewayModelCatalogService(prisma, notFoundFetch).refreshModels({
+      organizationId: org.id,
+      connectionId: broken.id,
+    });
+    expect(
+      await prisma.gatewayAiConnection.findUnique({
+        where: { id: broken.id },
+        select: { status: true },
+      }),
+    ).toEqual({ status: "ERROR" });
+
+    const timeoutFetch = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new Error("connection timed out"));
+    await new GatewayModelCatalogService(prisma, timeoutFetch).refreshModels({
+      organizationId: org.id,
+      connectionId: slow.id,
+    });
+    expect(
+      await prisma.gatewayAiConnection.findUnique({
+        where: { id: slow.id },
+        select: { status: true },
+      }),
+    ).toEqual({ status: "ENABLED" });
+    Object.assign(env, {
+      LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS: originalSegments,
+    });
+  });
+
   it("orders connections by creation time", async () => {
     const { caller, org } = await prepare();
     const created = [];
@@ -2943,5 +3001,294 @@ describe("AI gateway control plane", () => {
     ).rejects.toEqual(
       expect.objectContaining<Partial<GatewayResolveError>>({ status: 503 }),
     );
+  });
+
+  describe("model aliases", () => {
+    it("creates, reorders, and resolves through an alias", async () => {
+      const { caller, org } = await prepare();
+      const originalCloudRegion = sharedEnv.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
+      Object.assign(sharedEnv, {
+        NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: undefined,
+      });
+      const resolve4Spy = vi
+        .spyOn(dns, "resolve4")
+        .mockResolvedValue(["93.184.216.34"]);
+      const resolve6Spy = vi.spyOn(dns, "resolve6").mockResolvedValue([]);
+      const lookupSpy = vi
+        .spyOn(dns, "lookup")
+        .mockResolvedValue([{ address: "93.184.216.34", family: 4 }] as never);
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const path = new URL(String(input)).pathname;
+          if (path === "/v1/models") {
+            return new Response('{"data":[]}', { status: 200 });
+          }
+          return new Response("{}", { status: 404 });
+        });
+      try {
+        const openai = await caller.aiGateway.createConnection({
+          orgId: org.id,
+          name: "OpenAI-primary",
+          provider: "OPENAI",
+          credential: "sk-openai",
+        });
+        const custom = await caller.aiGateway.createConnection({
+          orgId: org.id,
+          name: "self-hosted-vllm",
+          provider: "CUSTOM",
+          credential: "sk-vllm",
+          baseUrl: "http://ai01.example:8000/v1",
+        });
+
+        const alias = await caller.aiGateway.upsertAlias({
+          orgId: org.id,
+          name: "glm-5.3",
+          targets: [
+            { connectionId: openai.id, providerModel: "GLM-5.3" },
+            { connectionId: custom.id, providerModel: "GLM-5.3" },
+          ],
+        });
+        expect(alias.name).toBe("glm-5.3");
+        expect(alias.targets.map((target) => target.connectionName)).toEqual([
+          "OpenAI-primary",
+          "self-hosted-vllm",
+        ]);
+
+        // Reorder: swap the two targets.
+        const reordered = await caller.aiGateway.upsertAlias({
+          orgId: org.id,
+          id: alias.id,
+          name: "glm-5.3",
+          targets: [
+            { connectionId: custom.id, providerModel: "GLM-5.3" },
+            { connectionId: openai.id, providerModel: "GLM-5.3" },
+          ],
+        });
+        expect(
+          reordered.targets.map((target) => target.connectionName),
+        ).toEqual(["self-hosted-vllm", "OpenAI-primary"]);
+
+        // Name conflict across aliases.
+        await caller.aiGateway.upsertAlias({
+          orgId: org.id,
+          name: "fallback-glm",
+          targets: [{ connectionId: openai.id, providerModel: "GLM-5.3" }],
+        });
+        await expect(
+          caller.aiGateway.upsertAlias({
+            orgId: org.id,
+            id: alias.id,
+            name: "fallback-glm",
+            targets: [{ connectionId: openai.id, providerModel: "GLM-5.3" }],
+          }),
+        ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+        // Unknown connection id.
+        await expect(
+          caller.aiGateway.upsertAlias({
+            orgId: org.id,
+            name: "broken",
+            targets: [{ connectionId: "nope", providerModel: "x" }],
+          }),
+        ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+        await expect(
+          caller.aiGateway.listAliases({ orgId: org.id }),
+        ).resolves.toEqual([
+          expect.objectContaining({ name: "glm-5.3" }),
+          expect.objectContaining({ name: "fallback-glm" }),
+        ]);
+
+        await caller.aiGateway.deleteAlias({ orgId: org.id, id: alias.id });
+        await expect(
+          caller.aiGateway.listAliases({ orgId: org.id }),
+        ).resolves.toEqual([expect.objectContaining({ name: "fallback-glm" })]);
+      } finally {
+        fetchSpy.mockRestore();
+        for (const spy of [resolve4Spy, resolve6Spy, lookupSpy])
+          spy.mockRestore();
+        Object.assign(sharedEnv, {
+          NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: originalCloudRegion,
+        });
+      }
+    });
+
+    it("blocks VIEWER from alias mutations and cross-organization access", async () => {
+      const owner = await prepare();
+      const other = await prepare();
+      const openai = await owner.caller.aiGateway.createConnection({
+        orgId: owner.org.id,
+        name: "OpenAI-primary",
+        provider: "OPENAI",
+        credential: "sk-openai",
+      });
+      const alias = await owner.caller.aiGateway.upsertAlias({
+        orgId: owner.org.id,
+        name: "glm-5.3",
+        targets: [{ connectionId: openai.id, providerModel: "GLM-5.3" }],
+      });
+      const viewerCaller = await createCallerForOrganizationRole(
+        owner,
+        Role.VIEWER,
+      );
+
+      await expect(
+        viewerCaller.aiGateway.upsertAlias({
+          orgId: owner.org.id,
+          name: "viewer-alias",
+          targets: [{ connectionId: openai.id, providerModel: "GLM-5.3" }],
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      // VIEWER holds gateway:read, so listing works.
+      await expect(
+        viewerCaller.aiGateway.listAliases({ orgId: owner.org.id }),
+      ).resolves.toEqual([expect.objectContaining({ name: "glm-5.3" })]);
+      await expect(
+        other.caller.aiGateway.upsertAlias({
+          orgId: other.org.id,
+          name: "cross-tenant",
+          targets: [{ connectionId: openai.id, providerModel: "GLM-5.3" }],
+        }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      await expect(
+        other.caller.aiGateway.deleteAlias({
+          orgId: other.org.id,
+          id: alias.id,
+        }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    });
+
+    it("resolves a request for an alias name through the alias targets", async () => {
+      const { caller, org, project } = await prepare();
+      await caller.aiGateway.updateConfig({
+        orgId: org.id,
+        defaultIngestionProjectId: project.id,
+        ingestionMode: "FULL",
+      });
+      const openai = await caller.aiGateway.createConnection({
+        orgId: org.id,
+        name: "OpenAI-primary",
+        provider: "OPENAI",
+        credential: "sk-openai",
+      });
+      await caller.aiGateway.upsertAlias({
+        orgId: org.id,
+        name: "glm-5.3",
+        targets: [{ connectionId: openai.id, providerModel: "GLM-5.3" }],
+      });
+
+      const gatewayKey = await caller.aiGateway.createApiKey({
+        orgId: org.id,
+        name: "Alias test key",
+        metadata: {},
+      });
+      await expect(
+        authenticateRequest({
+          fastHashedSecretKey: createShaHash(gatewayKey.secretKey, env.SALT),
+          apiFormat: "openai.chat-completions",
+          model: "glm-5.3",
+        }),
+      ).resolves.toMatchObject({
+        connection: { id: openai.id, provider_model: "GLM-5.3" },
+      });
+    });
+
+    it("falls back to the next alias target when the first connection is disabled", async () => {
+      const { caller, org, project } = await prepare();
+      await caller.aiGateway.updateConfig({
+        orgId: org.id,
+        defaultIngestionProjectId: project.id,
+        ingestionMode: "FULL",
+      });
+      const originalCloudRegion = sharedEnv.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
+      Object.assign(sharedEnv, {
+        NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: undefined,
+      });
+      const resolve4Spy = vi
+        .spyOn(dns, "resolve4")
+        .mockResolvedValue(["93.184.216.34"]);
+      const resolve6Spy = vi.spyOn(dns, "resolve6").mockResolvedValue([]);
+      const lookupSpy = vi
+        .spyOn(dns, "lookup")
+        .mockResolvedValue([{ address: "93.184.216.34", family: 4 }] as never);
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const path = new URL(String(input)).pathname;
+          if (path === "/v1/models") {
+            return new Response('{"data":[]}', { status: 200 });
+          }
+          return new Response("{}", { status: 404 });
+        });
+      try {
+        const openai = await caller.aiGateway.createConnection({
+          orgId: org.id,
+          name: "OpenAI-primary",
+          provider: "OPENAI",
+          credential: "sk-openai",
+        });
+        const custom = await caller.aiGateway.createConnection({
+          orgId: org.id,
+          name: "self-hosted-vllm",
+          provider: "CUSTOM",
+          credential: "sk-vllm",
+          baseUrl: "http://ai01.example:8000/v1",
+        });
+        const alias = await caller.aiGateway.upsertAlias({
+          orgId: org.id,
+          name: "glm-5.3",
+          targets: [
+            { connectionId: openai.id, providerModel: "GLM-5.3" },
+            { connectionId: custom.id, providerModel: "GLM-5.3" },
+          ],
+        });
+
+        const gatewayKey = await caller.aiGateway.createApiKey({
+          orgId: org.id,
+          name: "Fallback test key",
+          metadata: {},
+        });
+        const fastHashedSecretKey = createShaHash(
+          gatewayKey.secretKey,
+          env.SALT,
+        );
+        await expect(
+          authenticateRequest({
+            fastHashedSecretKey,
+            apiFormat: "openai.chat-completions",
+            model: "glm-5.3",
+          }),
+        ).resolves.toMatchObject({
+          connection: { id: openai.id, provider_model: "GLM-5.3" },
+        });
+
+        // Disable the first target's connection; the second target serves.
+        await caller.aiGateway.updateConnection({
+          orgId: org.id,
+          id: openai.id,
+          status: "DISABLED",
+        });
+        // The resolve cache is keyed by secret-key hash and invalidated by
+        // connection mutations, so a fresh authenticate sees the new state.
+        await expect(
+          authenticateRequest({
+            fastHashedSecretKey,
+            apiFormat: "openai.chat-completions",
+            model: "glm-5.3",
+          }),
+        ).resolves.toMatchObject({
+          connection: { id: custom.id, provider_model: "GLM-5.3" },
+        });
+        expect(alias.targets).toHaveLength(2);
+      } finally {
+        fetchSpy.mockRestore();
+        for (const spy of [resolve4Spy, resolve6Spy, lookupSpy])
+          spy.mockRestore();
+        Object.assign(sharedEnv, {
+          NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: originalCloudRegion,
+        });
+      }
+    });
   });
 });

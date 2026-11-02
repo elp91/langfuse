@@ -1,6 +1,7 @@
 import {
   AGENT_SETUP_DOCS_URLS,
   GATEWAY_KEY_PLACEHOLDER,
+  gatewayModelPlaceholder,
 } from "@/src/features/ai-gateway/constants/agentSetupInstructions";
 import type {
   AgentSetupContext,
@@ -64,7 +65,7 @@ export function buildCopilotCliInstructions(
           ...env,
           `export COPILOT_PROVIDER_BASE_URL="${context.gatewayOrigin}${path}"`,
           `export COPILOT_PROVIDER_API_KEY="${GATEWAY_KEY_PLACEHOLDER}"`,
-          'export COPILOT_MODEL="<model>"',
+          `export COPILOT_MODEL="${gatewayModelPlaceholder(context.aliases)}"`,
         ].join("\n"),
       },
       {
