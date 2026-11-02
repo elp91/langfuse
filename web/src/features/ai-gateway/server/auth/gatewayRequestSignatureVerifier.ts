@@ -10,18 +10,23 @@ import { createShaHash } from "@langfuse/shared/src/server/auth/apiKeys";
 
 import { GatewayApiFormatSchema, type GatewayApiFormat } from "../provider";
 import { GatewayControlPlaneError } from "@/src/features/ai-gateway/server/gatewayControlPlaneError";
+import { GatewayModelRoutingService } from "@/src/features/ai-gateway/server/routing/gatewayModelRoutingService";
 
 const RESOLVE_METHOD = "POST";
 const MODELS_METHOD = "GET";
 const SIGNATURE_DOMAIN = "gateway-web-v1";
 const SIGNATURE_MAX_AGE_SECONDS = 5 * 60;
+const modelRoutingService = new GatewayModelRoutingService();
 const resolveBodySchema = z
   .object({
     apiFormat: GatewayApiFormatSchema,
-    // Shape only, not routability: the routing decision needs the key's
-    // connections and aliases, which the authenticator looks up next, and an
-    // unroutable model fails there with a 400 as before.
-    model: z.string().min(1),
+    // Resolved against no connections: this only rejects slugs no routing
+    // could ever accept, so the status stays 400 before authentication. The
+    // real routing decision needs the key's connections and aliases, which
+    // the authenticator looks up next.
+    model: z
+      .string()
+      .refine((model) => modelRoutingService.resolve(model, []) !== null),
   })
   .strict();
 const modelsQuerySchema = z

@@ -13,6 +13,7 @@ const connections = [
     provider: "OPENAI",
     allowedModels: ["gpt-4.1", "gpt-4.1-mini"],
     supportedRoutes: [],
+    models: ["gpt-4.1", "gpt-4.1-mini"],
   },
   {
     id: "conn-anthropic",
@@ -20,6 +21,7 @@ const connections = [
     provider: "ANTHROPIC",
     allowedModels: [],
     supportedRoutes: [],
+    models: [],
   },
 ] satisfies ComponentProps<typeof AliasDialogController>["connections"];
 
@@ -63,6 +65,8 @@ export const EditAlias = meta.story({
                 id: "t-1",
                 connectionId: "conn-openai",
                 connectionName: "OpenAI production",
+                connectionProvider: "OPENAI",
+                connectionStatus: "ENABLED",
                 providerModel: "gpt-4.1",
                 position: 0,
               },
@@ -70,6 +74,8 @@ export const EditAlias = meta.story({
                 id: "t-2",
                 connectionId: "conn-anthropic",
                 connectionName: "Anthropic",
+                connectionProvider: "ANTHROPIC",
+                connectionStatus: "ENABLED",
                 providerModel: "claude-sonnet-4",
                 position: 1,
               },
