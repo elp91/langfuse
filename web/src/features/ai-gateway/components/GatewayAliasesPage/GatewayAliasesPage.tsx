@@ -122,13 +122,13 @@ function ConnectedGatewayAliasesTable({
       accessorKey: "targets",
       header: "Targets",
       cell: ({ row }) => (
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-col items-start gap-1.5">
           {row.original.targets.map((target, index) => {
             const ProviderIcon = providerIcons[target.connectionProvider];
             return (
               <span
                 key={target.id}
-                className="inline-flex items-center gap-1.5"
+                className="flex flex-col items-start gap-0.5"
               >
                 <BadgeShell
                   color="filled"
@@ -146,10 +146,15 @@ function ConnectedGatewayAliasesTable({
                     {target.providerModel}
                   </span>
                 </BadgeShell>
-                {/** The arrow trails each badge: read as "this one, then the
-                 * next", instead of pointing at the badge it precedes. */}
+                {/** Targets stack in fallback order; the arrow points from
+                 * each badge down to the next one. */}
                 {index < row.original.targets.length - 1 ? (
-                  <span className="text-muted-foreground text-xs">→</span>
+                  <span
+                    aria-hidden
+                    className="text-muted-foreground ml-4 text-xs leading-none"
+                  >
+                    ↓
+                  </span>
                 ) : null}
               </span>
             );
