@@ -231,6 +231,12 @@ async fn relay(
         )
         .await
         .map_err(InferenceHttpError::Resolution)?;
+    // The namespace route precedes resolution, so the first record carries the
+    // namespace's provider; a custom connection serves any namespace, and the
+    // resolved connection is the fact the metrics must attribute.
+    correlation
+        .observation()
+        .record_provider(context.connection().provider().as_str());
     inference
         .forward(
             permit,

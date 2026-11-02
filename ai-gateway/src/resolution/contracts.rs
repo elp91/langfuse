@@ -1,4 +1,4 @@
-use super::{ResolutionError, valid_token};
+use super::{ResolutionError, valid_optional_token, valid_token};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Url;
 use secrecy::{ExposeSecret, SecretString};
@@ -40,6 +40,7 @@ impl ApiFormat {
 pub enum Provider {
     OpenAi,
     Anthropic,
+    Custom,
 }
 
 impl Provider {
@@ -48,6 +49,7 @@ impl Provider {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::Custom => "custom",
         }
     }
 
@@ -55,25 +57,37 @@ impl Provider {
         match self {
             Self::OpenAi => "https://api.openai.com/v1",
             Self::Anthropic => "https://api.anthropic.com/v1",
+            // A custom connection's origin comes from Web, never the registry.
+            Self::Custom => "",
         }
     }
 
     fn supports(self, api_format: ApiFormat) -> bool {
-        matches!(
-            (self, api_format),
-            (
-                Self::OpenAi,
+        match self {
+            Self::OpenAi => matches!(
+                api_format,
                 ApiFormat::OpenAiResponses | ApiFormat::OpenAiChatCompletions
-            ) | (Self::Anthropic, ApiFormat::AnthropicMessages)
-        )
+            ),
+            Self::Anthropic => matches!(api_format, ApiFormat::AnthropicMessages),
+            // Whether an OpenAI-compatible host serves Responses or Messages is
+            // per connection; Web's route probe records it, so the gateway
+            // accepts all three formats and lets the upstream answer.
+            Self::Custom => matches!(
+                api_format,
+                ApiFormat::OpenAiResponses
+                    | ApiFormat::OpenAiChatCompletions
+                    | ApiFormat::AnthropicMessages
+            ),
+        }
     }
 
     fn accepts(self, credential: ProviderCredential<'_>) -> bool {
-        matches!(
-            (self, credential),
-            (Self::OpenAi, ProviderCredential::Bearer(_))
-                | (Self::Anthropic, ProviderCredential::XApiKey(_))
-        )
+        match self {
+            // vLLM, SGLang, and OpenAI-compatible servers authenticate with
+            // Bearer; Web sends Bearer even when the credential is optional.
+            Self::OpenAi | Self::Custom => matches!(credential, ProviderCredential::Bearer(_)),
+            Self::Anthropic => matches!(credential, ProviderCredential::XApiKey(_)),
+        }
     }
 }
 
@@ -417,8 +431,13 @@ pub(super) fn decode(
         || connection.api_format != expected_format
         || !provider.supports(connection.api_format)
         || !valid_connection_origin(&connection.base_url)
-        || !provider.accepts(connection.credential())
-        || !valid_token(connection.credential().secret())
+        // A custom connection may omit its key entirely; the other providers
+        // always carry one.
+        || (provider != Provider::Custom
+            && (!provider.accepts(connection.credential())
+                || !valid_token(connection.credential().secret())))
+        || (provider == Provider::Custom
+            && !valid_optional_token(connection.credential()))
         || !valid_ingestion(&response, now)
         || [
             connection.id.as_str(),

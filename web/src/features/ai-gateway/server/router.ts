@@ -284,16 +284,26 @@ export const aiGatewayRouter = createTRPCRouter({
     .input(
       organizationInput.extend({
         provider: z.enum(GatewayProvider),
-        credential: z.string().min(1),
+        credential: z.string(),
+        baseUrl: z.string().optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
       requireGatewayAdmin({ session: ctx.session, orgId: input.orgId });
+      if (input.provider === "CUSTOM") {
+        const routes = await new GatewayProviderService(
+          ctx.prisma,
+        ).testCustomConnection({
+          baseUrl: input.baseUrl,
+          credential: input.credential,
+        });
+        return { success: true, routes };
+      }
       await new GatewayProviderService(ctx.prisma).testCredential({
         provider: input.provider,
         credential: input.credential,
       });
-      return { success: true };
+      return { success: true, routes: null };
     }),
 
   createConnection: protectedOrganizationProcedureWithoutTracing
@@ -301,7 +311,10 @@ export const aiGatewayRouter = createTRPCRouter({
       organizationInput.extend({
         name: connectionNameSchema,
         provider: z.enum(GatewayProvider),
-        credential: z.string().min(1),
+        // Credential-optional for CUSTOM; the service enforces the per-provider
+        // rule after it knows the provider.
+        credential: z.string(),
+        baseUrl: z.string().optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
@@ -311,6 +324,7 @@ export const aiGatewayRouter = createTRPCRouter({
         name: input.name,
         provider: input.provider,
         credential: input.credential,
+        baseUrl: input.baseUrl,
         session: ctx.session,
       });
       return connection;
@@ -322,6 +336,7 @@ export const aiGatewayRouter = createTRPCRouter({
         id: z.string(),
         name: connectionNameSchema.optional(),
         credential: z.string().min(1).optional(),
+        baseUrl: z.string().optional(),
         status: z
           .enum([
             GatewayConnectionStatus.ENABLED,
@@ -337,6 +352,7 @@ export const aiGatewayRouter = createTRPCRouter({
         id: input.id,
         name: input.name,
         credential: input.credential,
+        baseUrl: input.baseUrl,
         status: input.status,
         session: ctx.session,
       });
