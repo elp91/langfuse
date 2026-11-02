@@ -10,9 +10,16 @@ type RefreshResult = RouterOutputs["aiGateway"]["refreshModels"][number];
 const providerFormats = {
   OPENAI: ["OpenAI Responses", "OpenAI Chat Completions"],
   ANTHROPIC: ["Anthropic Messages"],
+  CUSTOM: ["OpenAI Responses", "OpenAI Chat Completions", "Anthropic Messages"],
 } as const satisfies Record<GatewayProvider, readonly string[]>;
 
 export type ApiFormat = (typeof providerFormats)[GatewayProvider][number];
+
+const routeFormatLabels: Record<string, ApiFormat> = {
+  "openai.responses": "OpenAI Responses",
+  "openai.chat-completions": "OpenAI Chat Completions",
+  "anthropic.messages": "Anthropic Messages",
+};
 
 type ModelRow = {
   id: string;
@@ -38,6 +45,14 @@ export function aggregateModels(
     const result = resultsByConnectionId.get(connection.id);
     if (!result?.success) continue;
     const allowedModels = toGatewayAllowedModelsSet(connection.allowedModels);
+    // A custom connection's Test-connection probe recorded which routes the
+    // host serves; before a probe ran, show every advertised format.
+    const apiFormats = connection.supportedRoutes
+      ? connection.supportedRoutes
+          .map((route) => routeFormatLabels[route])
+          .filter((format): format is ApiFormat => Boolean(format))
+          .toSorted((left, right) => left.localeCompare(right))
+      : [...providerFormats[connection.provider]];
     for (const modelId of result.models.toSorted((left, right) =>
       left.localeCompare(right),
     )) {
@@ -47,7 +62,7 @@ export function aggregateModels(
         connectionId: connection.id,
         connectionName: connection.name,
         provider: connection.provider,
-        apiFormats: [...providerFormats[connection.provider]],
+        apiFormats,
       });
     }
   }

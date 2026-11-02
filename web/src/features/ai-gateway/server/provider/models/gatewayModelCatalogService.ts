@@ -110,12 +110,15 @@ export class GatewayModelCatalogService {
       organizationId,
       "ENABLED",
     );
-    return connections.map(({ id, name, provider, allowedModels }) => ({
-      id,
-      name,
-      provider,
-      allowedModels,
-    }));
+    return connections.map(
+      ({ id, name, provider, allowedModels, supportedRoutes }) => ({
+        id,
+        name,
+        provider,
+        allowedModels,
+        supportedRoutes,
+      }),
+    );
   }
 
   async refreshModels(params: {
@@ -239,9 +242,14 @@ export class GatewayModelCatalogService {
     }
 
     const provider = connection.provider as GatewayProviderName;
-    const credential = decrypt(connection.encryptedCredential);
+    // A keyless CUSTOM connection stores an empty column, which decrypt
+    // cannot parse; the adapter sends no Authorization header for "".
+    const credential = connection.encryptedCredential
+      ? decrypt(connection.encryptedCredential)
+      : "";
     const models = await getModelDiscoveryAdapter(provider).fetchCatalog({
       credential,
+      baseUrl: connection.baseUrl ?? undefined,
       fetcher: this.fetcher,
     });
     if (!models.success) {

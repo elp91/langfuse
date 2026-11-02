@@ -24,6 +24,15 @@ const COPILOT_PROVIDERS: Record<
       'export COPILOT_PROVIDER_WIRE_API="responses"',
     ],
   },
+  // A custom connection is OpenAI-compatible; whether it serves Responses
+  // decides Copilot CLI support, which the route probe records.
+  CUSTOM: {
+    path: "/openai/v1",
+    env: [
+      'export COPILOT_PROVIDER_TYPE="openai"',
+      'export COPILOT_PROVIDER_WIRE_API="responses"',
+    ],
+  },
 };
 
 export function buildCopilotCliInstructions(
