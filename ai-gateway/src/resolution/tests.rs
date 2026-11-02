@@ -775,20 +775,26 @@ async fn rejects_connections_whose_provider_format_origin_and_credential_disagre
         json!({"type": "x-api-key", "header": "x-api-key", "value": "provider-key"});
     assert_invalid_context_for(body, ApiFormat::OpenAiResponses).await;
 
-    // Every single-field deviation from the official Anthropic pairing.
+    // Every single-field deviation from the official Anthropic pairing. Origins are
+    // only checked structurally at decode time; reachability is connect-time.
     let mutations = [
         ("/connection/provider", json!("openai")),
         ("/connection/api_format", json!("openai.responses")),
-        ("/connection/base_url", json!("https://api.openai.com/v1")),
-        ("/connection/base_url", json!("http://api.anthropic.com/v1")),
+        ("/connection/base_url", json!("not a url")),
+        ("/connection/base_url", json!("ftp://api.anthropic.com/v1")),
         (
             "/connection/base_url",
-            json!("https://api.anthropic.com.attacker.example/v1"),
+            json!("https://user:pass@api.anthropic.com/v1"),
         ),
         (
             "/connection/base_url",
-            json!("https://api.anthropic.com/v1/"),
+            json!("https://api.anthropic.com/v1?x=1"),
         ),
+        (
+            "/connection/base_url",
+            json!("https://api.anthropic.com/v1#frag"),
+        ),
+        ("/connection/base_url", json!("")),
         (
             "/connection/auth",
             json!({"type": "Bearer", "token": "provider-key"}),
@@ -832,12 +838,8 @@ async fn rejects_incompatible_or_incomplete_execution_contexts() {
         ("/ingestion_mode", json!({"usage": null})),
         ("/connection/provider", json!("anthropic")),
         ("/connection/api_format", json!("openai.chatcompletions")),
-        ("/connection/base_url", json!("https://attacker.example/v1")),
-        (
-            "/connection/base_url",
-            json!("https://api.openai.com.attacker.example/v1"),
-        ),
-        ("/connection/base_url", json!("http://api.openai.com/v1")),
+        ("/connection/base_url", json!("not a url")),
+        ("/connection/base_url", json!("ftp://api.openai.com/v1")),
         (
             "/connection/base_url",
             json!("https://api.openai.com/v1?redirect=elsewhere"),
