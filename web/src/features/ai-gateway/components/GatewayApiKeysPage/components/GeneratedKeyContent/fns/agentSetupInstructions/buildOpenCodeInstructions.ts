@@ -15,6 +15,7 @@ const OPENCODE_PROVIDERS: Record<
 > = {
   ANTHROPIC: { id: "anthropic", path: "/anthropic/v1" },
   OPENAI: { id: "openai", path: "/openai/v1" },
+  CUSTOM: { id: "custom", path: "/openai/v1" },
 };
 
 export function buildOpenCodeInstructions(

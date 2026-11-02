@@ -21,6 +21,8 @@ type ModelDiscoveryResult =
 export interface ModelDiscoveryAdapter {
   fetchCatalog(params: {
     credential: string;
+    /** Registry origin for fixed providers; the connection origin for CUSTOM. */
+    baseUrl?: string;
     fetcher: typeof fetch;
   }): Promise<ModelDiscoveryResult>;
 }

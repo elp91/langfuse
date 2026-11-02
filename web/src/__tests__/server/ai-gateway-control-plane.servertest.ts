@@ -1,5 +1,7 @@
 import { testFeatureFlags } from "@/src/__tests__/fixtures/feature-flags";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import dns from "node:dns/promises";
+import { env as sharedEnv } from "@langfuse/shared/src/env";
 
 import type { Session } from "next-auth";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -272,7 +274,13 @@ describe("AI gateway control plane", () => {
     async ({ productUrl, gatewayUrl }) => {
       const { caller, org } = await prepare();
       const originalNextAuthUrl = env.NEXTAUTH_URL;
+      const originalPublicUrl = env.LANGFUSE_AI_GATEWAY_PUBLIC_URL;
       (env as { NEXTAUTH_URL: string }).NEXTAUTH_URL = productUrl;
+      // Derive from the product URL: a local .env sets the public override,
+      // which would otherwise win in both cases.
+      (
+        env as { LANGFUSE_AI_GATEWAY_PUBLIC_URL: string | undefined }
+      ).LANGFUSE_AI_GATEWAY_PUBLIC_URL = undefined;
 
       try {
         await expect(
@@ -280,6 +288,9 @@ describe("AI gateway control plane", () => {
         ).resolves.toMatchObject({ gatewayBaseUrl: gatewayUrl });
       } finally {
         (env as { NEXTAUTH_URL: string }).NEXTAUTH_URL = originalNextAuthUrl;
+        (
+          env as { LANGFUSE_AI_GATEWAY_PUBLIC_URL: string | undefined }
+        ).LANGFUSE_AI_GATEWAY_PUBLIC_URL = originalPublicUrl;
       }
     },
   );
@@ -884,6 +895,7 @@ describe("AI gateway control plane", () => {
           name: "Shared-OpenAI",
           provider: "OPENAI",
           allowedModels: ["enabled-model"],
+          supportedRoutes: null,
         },
       ]);
       await expect(
@@ -944,6 +956,264 @@ describe("AI gateway control plane", () => {
     }
   });
 
+  it("stores custom provider routes from the connection probe", async () => {
+    const { caller, org } = await prepare();
+    const originalCloudRegion = sharedEnv.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
+    // The validator requires HTTPS on Langfuse Cloud; these probes use http.
+    Object.assign(sharedEnv, { NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: undefined });
+    const baseUrl = "http://ai02.example:8000/v1";
+    // Validation resolves the host even for a mocked fetch, so pin DNS to a
+    // public address for the probe's origin.
+    const dnsSpy = vi
+      .spyOn(dns, "resolve4")
+      .mockResolvedValue(["93.184.216.34"]);
+    const resolve6Spy = vi.spyOn(dns, "resolve6").mockResolvedValue([]);
+    const lookupSpy = vi
+      .spyOn(dns, "lookup")
+      .mockResolvedValue([{ address: "93.184.216.34", family: 4 }] as never);
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const path = new URL(String(input)).pathname;
+          if (path === "/v1/models") {
+            return new Response('{"data":[]}', { status: 200 });
+          }
+          if (path === "/v1/chat/completions" && init?.method === "POST") {
+            return new Response("{}", { status: 400 });
+          }
+          return new Response("{}", { status: 404 });
+        },
+      );
+
+    const created = await caller.aiGateway.createConnection({
+      orgId: org.id,
+      name: "self-hosted-vllm",
+      provider: "CUSTOM",
+      credential: "sk-vllm",
+      baseUrl,
+    });
+
+    expect(created).toMatchObject({
+      provider: "CUSTOM",
+      baseUrl,
+      supportedRoutes: ["openai.chat-completions"],
+    });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ pathname: "/v1/models" }),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk-vllm" }),
+      }),
+    );
+    fetchSpy.mockRestore();
+    for (const spy of [dnsSpy, resolve6Spy, lookupSpy]) spy.mockRestore();
+    Object.assign(sharedEnv, {
+      NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: originalCloudRegion,
+    });
+  });
+
+  it("creates a keyless custom connection and probes no routes", async () => {
+    const { caller, org } = await prepare();
+    const originalCloudRegion = sharedEnv.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
+    Object.assign(sharedEnv, { NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: undefined });
+    const resolve4Spy = vi
+      .spyOn(dns, "resolve4")
+      .mockResolvedValue(["93.184.216.34"]);
+    const resolve6Spy = vi.spyOn(dns, "resolve6").mockResolvedValue([]);
+    const lookupSpy = vi
+      .spyOn(dns, "lookup")
+      .mockResolvedValue([{ address: "93.184.216.34", family: 4 }] as never);
+
+    const created = await caller.aiGateway.createConnection({
+      orgId: org.id,
+      name: "keyless-vllm",
+      provider: "CUSTOM",
+      credential: "",
+      baseUrl: "http://ai02.example:8000/v1",
+    });
+
+    expect(created.supportedRoutes).toEqual([]);
+    const stored = await prisma.gatewayAiConnection.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { encryptedCredential: true },
+    });
+    expect(stored.encryptedCredential).toBe("");
+    for (const spy of [resolve4Spy, resolve6Spy, lookupSpy]) spy.mockRestore();
+    Object.assign(sharedEnv, {
+      NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: originalCloudRegion,
+    });
+  });
+
+  it("rejects a credential-less registry provider connection", async () => {
+    const { caller, org } = await prepare();
+
+    await expect(
+      caller.aiGateway.createConnection({
+        orgId: org.id,
+        name: "OpenAI keyless",
+        provider: "OPENAI",
+        credential: "",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("re-probes a custom connection with the stored credential on a base URL change", async () => {
+    const { caller, org } = await prepare();
+    // Mocks must precede create: both create and the update resolve the host.
+    const originalCloudRegion = sharedEnv.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
+    Object.assign(sharedEnv, { NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: undefined });
+    const resolve4Spy = vi
+      .spyOn(dns, "resolve4")
+      .mockResolvedValue(["93.184.216.34"]);
+    const resolve6Spy = vi.spyOn(dns, "resolve6").mockResolvedValue([]);
+    const lookupSpy = vi
+      .spyOn(dns, "lookup")
+      .mockResolvedValue([{ address: "93.184.216.34", family: 4 }] as never);
+    // A host that authenticates /models: an unauthenticated re-probe would
+    // fail the update with "unauthorized".
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const path = new URL(String(input)).pathname;
+          const authorized = Boolean(
+            (init?.headers as Record<string, string> | undefined)
+              ?.Authorization,
+          );
+          if (path === "/v1/models" && authorized) {
+            return new Response('{"data":[]}', { status: 200 });
+          }
+          // 401 on a route the host does not serve is still "absent" to the
+          // probe only via 404/405; answer 404 for unknown routes.
+          if (path === "/v1/chat/completions" && authorized) {
+            return new Response("{}", { status: 400 });
+          }
+          return new Response("{}", { status: 404 });
+        },
+      );
+    const created = await caller.aiGateway.createConnection({
+      orgId: org.id,
+      name: "self-hosted-vllm",
+      provider: "CUSTOM",
+      credential: "sk-vllm",
+      baseUrl: "http://ai02.example:8000/v1",
+    });
+
+    try {
+      const updated = await caller.aiGateway.updateConnection({
+        orgId: org.id,
+        id: created.id,
+        baseUrl: "http://ai03.example:8000/v1",
+      });
+      expect(updated.baseUrl).toBe("http://ai03.example:8000/v1");
+      expect(updated.supportedRoutes).toEqual(["openai.chat-completions"]);
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ pathname: "/v1/models" }),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer sk-vllm",
+          }),
+        }),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+      for (const spy of [resolve4Spy, resolve6Spy, lookupSpy])
+        spy.mockRestore();
+      Object.assign(sharedEnv, {
+        NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: originalCloudRegion,
+      });
+    }
+  });
+
+  it("rejects a custom connection whose base URL is a private address", async () => {
+    const { caller, org } = await prepare();
+
+    await expect(
+      caller.aiGateway.createConnection({
+        orgId: org.id,
+        name: "internal-vllm",
+        provider: "CUSTOM",
+        credential: "sk-vllm",
+        baseUrl: "http://169.254.169.254/latest/meta-data",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      caller.aiGateway.createConnection({
+        orgId: org.id,
+        name: "internal-vllm-2",
+        provider: "CUSTOM",
+        credential: "sk-vllm",
+        baseUrl: "http://127.0.0.1:8000/v1",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      prisma.gatewayAiConnection.count({
+        where: { organizationId: org.id },
+      }),
+    ).resolves.toBe(0);
+  });
+
+  it("blocks VIEWER from custom connection mutations and cross-organization access", async () => {
+    const owner = await prepare();
+    const other = await prepare();
+    const originalCloudRegion = sharedEnv.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
+    Object.assign(sharedEnv, { NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: undefined });
+    const resolve4Spy = vi
+      .spyOn(dns, "resolve4")
+      .mockResolvedValue(["93.184.216.34"]);
+    const resolve6Spy = vi.spyOn(dns, "resolve6").mockResolvedValue([]);
+    const lookupSpy = vi
+      .spyOn(dns, "lookup")
+      .mockResolvedValue([{ address: "93.184.216.34", family: 4 }] as never);
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/v1/models") {
+          return new Response('{"data":[]}', { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      });
+    try {
+      const connection = await owner.caller.aiGateway.createConnection({
+        orgId: owner.org.id,
+        name: "self-hosted-vllm",
+        provider: "CUSTOM",
+        credential: "sk-vllm",
+        baseUrl: "http://ai02.example:8000/v1",
+      });
+      const viewerCaller = await createCallerForOrganizationRole(
+        owner,
+        Role.VIEWER,
+      );
+
+      await expect(
+        viewerCaller.aiGateway.testConnection({
+          orgId: owner.org.id,
+          provider: "CUSTOM",
+          credential: "sk-vllm",
+          baseUrl: "http://ai02.example:8000/v1",
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      // Cross-tenant: a member of another organization cannot update this
+      // connection's id; the org-scoped update finds no row.
+      await expect(
+        other.caller.aiGateway.updateConnection({
+          orgId: other.org.id,
+          id: connection.id,
+          baseUrl: "http://ai09.example:8000/v1",
+        }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    } finally {
+      fetchSpy.mockRestore();
+      for (const spy of [resolve4Spy, resolve6Spy, lookupSpy])
+        spy.mockRestore();
+      Object.assign(sharedEnv, {
+        NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: originalCloudRegion,
+      });
+    }
+  });
+
   it("stores provider credentials encrypted and never returns them", async () => {
     const { caller, org } = await prepare();
     const credential = "sk-test-gateway-redaction";
@@ -977,6 +1247,7 @@ describe("AI gateway control plane", () => {
         name: "OpenAI-primary",
         provider: "OPENAI",
         allowedModels: null,
+        supportedRoutes: null,
       },
     ]);
 

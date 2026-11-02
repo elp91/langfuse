@@ -9,8 +9,12 @@ import {
   LangfuseConflictError,
   LangfuseNotFoundError,
 } from "@langfuse/shared";
-import { encrypt } from "@langfuse/shared/encryption";
-import { LLMAdapter, testModelCall } from "@langfuse/shared/src/server";
+import { decrypt, encrypt } from "@langfuse/shared/encryption";
+import {
+  LLMAdapter,
+  testModelCall,
+  validateLlmConnectionBaseURL,
+} from "@langfuse/shared/src/server";
 import { getDisplaySecretKey } from "@langfuse/shared/src/server/auth/apiKeys";
 
 import { auditLog } from "@/src/features/audit-logs/server";
@@ -22,6 +26,11 @@ import {
 } from "@/src/features/ai-gateway/server/provider/registry";
 import { invalidateGatewayResolveCacheForOrganization } from "@/src/features/ai-gateway/server/resolve/gatewayResolveCache";
 import { parseGatewayConnectionName } from "./parseGatewayConnectionName";
+import {
+  probeCustomRoutes,
+  parseOrigin,
+  type SupportedRoutes,
+} from "./probeCustomRoutes";
 import { GatewayProviderRepository } from "./gatewayProviderRepository";
 import { GatewayModelCatalogService } from "../models/gatewayModelCatalogService";
 
@@ -69,11 +78,21 @@ export class GatewayProviderService {
     return this.validateCredential(params);
   }
 
+  /** Test connection for CUSTOM providers: probe the origin's routes. */
+  async testCustomConnection(params: { baseUrl?: string; credential: string }) {
+    const baseUrl = await parseRequiredBaseUrl(params.baseUrl);
+    return probeRoutes({
+      baseUrl,
+      credential: params.credential || null,
+    });
+  }
+
   async create(params: {
     organizationId: string;
     name: string;
     provider: GatewayProvider;
     credential: string;
+    baseUrl?: string;
     session: OrgAuthedContext["session"];
   }) {
     const name = parseGatewayConnectionName(params.name);
@@ -81,20 +100,41 @@ export class GatewayProviderService {
       organizationId: params.organizationId,
       name,
     });
+    // Only CUSTOM may omit a credential; every registry provider needs one
+    // for the generation probe below.
+    if (params.provider !== "CUSTOM" && !params.credential.trim()) {
+      throw new InvalidRequestError("A provider credential is required");
+    }
     await this.testCredential({
       provider: params.provider,
       credential: params.credential,
     });
+    const baseUrl =
+      params.provider === "CUSTOM"
+        ? await parseRequiredBaseUrl(params.baseUrl)
+        : null;
+    // A keyless custom connection has nothing to authenticate with, so the
+    // probe records no routes until a credential is added.
+    const supportedRoutes =
+      params.provider === "CUSTOM"
+        ? await probeRoutesForCredential(params.credential, baseUrl)
+        : null;
     let connection;
     try {
       connection = await this.repository.createConnection({
         organizationId: params.organizationId,
         name,
         provider: params.provider,
-        encryptedCredential: encrypt(params.credential),
+        baseUrl,
+        // A keyless CUSTOM connection stores an empty column rather than an
+        // empty ciphertext, which decrypt cannot parse.
+        encryptedCredential: params.credential.trim()
+          ? encrypt(params.credential)
+          : "",
         displaySecret: getDisplaySecretKey(params.credential),
         createdById: params.session.user.id,
         status: "ENABLED",
+        supportedRoutes,
       });
     } catch (error) {
       rethrowConnectionMutationError(error);
@@ -118,6 +158,7 @@ export class GatewayProviderService {
     id: string;
     name?: string;
     credential?: string;
+    baseUrl?: string;
     status?: GatewayConnectionStatus;
     session: OrgAuthedContext["session"];
   }) {
@@ -153,20 +194,67 @@ export class GatewayProviderService {
         credential: params.credential,
       });
     }
+    // Only a CUSTOM connection may drop its credential; the other providers
+    // cannot authenticate without one.
+    if (
+      params.credential !== undefined &&
+      !params.credential.trim() &&
+      existing.provider !== "CUSTOM"
+    ) {
+      throw new InvalidRequestError("A provider credential is required");
+    }
+
+    const baseUrl =
+      existing.provider === "CUSTOM"
+        ? await parseRequiredBaseUrl(
+            params.baseUrl ?? existing.baseUrl ?? undefined,
+          )
+        : null;
+    const baseUrlChanged = baseUrl !== existing.baseUrl;
+    // Re-probe when the credential or origin changes. A credential-only edit
+    // probes with the new key; a base-URL-only edit probes with the stored
+    // key, so an admin can move an authenticated connection without
+    // re-entering its secret.
+    let storedCredential: string | null = null;
+    if (
+      existing.provider === "CUSTOM" &&
+      !params.credential &&
+      baseUrlChanged
+    ) {
+      const row = await this.repository.getConnectionWithCredential({
+        organizationId: params.organizationId,
+        id: params.id,
+      });
+      storedCredential =
+        row && row.encryptedCredential
+          ? decrypt(row.encryptedCredential)
+          : null;
+    }
+    const supportedRoutes =
+      existing.provider === "CUSTOM" &&
+      (params.credential !== undefined || baseUrlChanged)
+        ? await probeRoutesForCredential(
+            params.credential ?? storedCredential,
+            baseUrl,
+          )
+        : undefined;
 
     let updated;
     try {
+      // A keyless CUSTOM connection stores an empty column rather than an
+      // empty ciphertext, which decrypt cannot parse.
+      const encryptedCredential = credentialColumn(params.credential);
       updated = await this.repository.updateConnection({
         organizationId: params.organizationId,
         id: params.id,
         name,
+        baseUrl,
         status: params.credential ? "ENABLED" : params.status,
-        encryptedCredential: params.credential
-          ? encrypt(params.credential)
-          : undefined,
+        encryptedCredential,
         displaySecret: params.credential
           ? getDisplaySecretKey(params.credential)
           : undefined,
+        supportedRoutes,
       });
     } catch (error) {
       rethrowConnectionMutationError(error);
@@ -281,14 +369,88 @@ function rethrowConnectionMutationError(error: unknown): never {
   throw error;
 }
 
+async function parseRequiredBaseUrl(
+  baseUrl: string | undefined,
+): Promise<string> {
+  const origin = baseUrl === undefined ? null : parseOrigin(baseUrl);
+  if (!origin) {
+    throw new InvalidRequestError(
+      "A custom provider connection requires a valid base URL (http or https, no query or credentials)",
+    );
+  }
+  // Blocks private and reserved addresses (loopback, RFC1918, link-local),
+  // honors the LLM connection exemption env vars, and enforces HTTPS on
+  // Langfuse Cloud. The gateway re-checks egress at connect time; this check
+  // keeps the Web-side probe and catalog fetch from issuing the request.
+  try {
+    await validateLlmConnectionBaseURL(origin);
+  } catch (error) {
+    throw new InvalidRequestError(
+      error instanceof Error ? error.message : "Invalid base URL",
+    );
+  }
+  return origin;
+}
+
+async function probeRoutes(params: {
+  baseUrl: string;
+  credential: string | null;
+}): Promise<SupportedRoutes> {
+  const result = await probeCustomRoutes({
+    baseUrl: params.baseUrl,
+    credential: params.credential,
+    // Read at call time so tests can spy on globalThis.fetch.
+    fetcher: (...args) => fetch(...args),
+  });
+  if (!result.success) {
+    throw new InvalidRequestError(
+      `Connection test failed: ${result.error.replace(/_/g, " ")}`,
+    );
+  }
+  return result.routes;
+}
+
+/**
+ * Credential column for a CUSTOM connection. A keyless connection stores an
+ * empty column rather than an empty ciphertext, which decrypt cannot parse.
+ */
+function credentialColumn(credential: string | undefined): string | undefined {
+  if (credential === undefined) {
+    return undefined;
+  }
+  return credential.trim() ? encrypt(credential) : "";
+}
+
+/**
+ * Routes for a CUSTOM connection given the credential in play. A keyless
+ * connection has nothing to authenticate with, so it records no routes until
+ * a credential is added.
+ */
+async function probeRoutesForCredential(
+  credential: string | null | undefined,
+  baseUrl: string | null,
+): Promise<SupportedRoutes> {
+  if (!credential?.trim()) {
+    return [];
+  }
+  return probeRoutes({
+    baseUrl: baseUrl as string,
+    credential,
+  });
+}
+
 async function validateGatewayCredential(params: {
   provider: GatewayProviderName;
   credential: string;
 }): Promise<void> {
   const definition = getGatewayProviderDefinition(params.provider);
+  // CUSTOM has no fixed origin or representative model; its Test connection is
+  // the route probe, which runs against the connection's own baseUrl.
+  if (params.provider === "CUSTOM") return;
   const adapter =
     params.provider === "ANTHROPIC" ? LLMAdapter.Anthropic : LLMAdapter.OpenAI;
-  const model = definition.validationModel;
+  // After the CUSTOM return, only fixed-origin providers remain.
+  const model = definition.validationModel as string;
 
   try {
     await testModelCall({
@@ -305,7 +467,7 @@ async function validateGatewayCredential(params: {
         secretKey: encrypt(params.credential),
         extraHeaders: null,
         extraHeaderKeys: [],
-        baseURL: definition.baseUrl,
+        baseURL: definition.baseUrl as string,
         customModels: [],
         withDefaultModels: true,
         config: null,

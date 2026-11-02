@@ -31,6 +31,15 @@ const LIST_MODELS_STEPS: Record<GatewayProvider, AgentSetupStep> = {
       '  -H "anthropic-version: 2023-06-01"',
     ].join("\n"),
   },
+  CUSTOM: {
+    title: "List models through the OpenAI route",
+    description: "A model list means the key and the custom connection work.",
+    language: "sh",
+    code: [
+      'curl -s "$LANGFUSE_GATEWAY_HOST/openai/v1/models" \\',
+      '  -H "Authorization: Bearer $LANGFUSE_GATEWAY_KEY"',
+    ].join("\n"),
+  },
 };
 
 export function buildApiInstructions(
