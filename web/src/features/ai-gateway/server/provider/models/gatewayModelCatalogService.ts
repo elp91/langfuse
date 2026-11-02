@@ -110,14 +110,20 @@ export class GatewayModelCatalogService {
       organizationId,
       "ENABLED",
     );
-    return connections.map(
-      ({ id, name, provider, allowedModels, supportedRoutes }) => ({
-        id,
-        name,
-        provider,
-        allowedModels,
-        supportedRoutes,
-      }),
+    return Promise.all(
+      connections.map(
+        async ({ id, name, provider, allowedModels, supportedRoutes }) => {
+          const cachedModels = await this.getCachedModels(organizationId, id);
+          return {
+            id,
+            name,
+            provider,
+            allowedModels,
+            supportedRoutes,
+            models: cachedModels?.map(({ id }) => id) ?? [],
+          };
+        },
+      ),
     );
   }
 
