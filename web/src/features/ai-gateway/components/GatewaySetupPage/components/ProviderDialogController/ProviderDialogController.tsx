@@ -292,8 +292,9 @@ export function ProviderDialogController({
                   <Alert.Description>
                     This host serves:{" "}
                     {probeRoutes.map((route) => ROUTE_LABELS[route]).join(", ")}
-                    . Agents using other routes will fail over to nothing —
-                    check the alias targets in a later release.
+                    . Agents that need other routes cannot use this connection
+                    directly — route them through an alias whose targets serve
+                    their route.
                   </Alert.Description>
                 </Alert>
               ) : null}
