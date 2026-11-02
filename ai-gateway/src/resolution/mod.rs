@@ -406,9 +406,7 @@ fn valid_token(value: &str) -> bool {
 fn valid_optional_token(credential: ProviderCredential<'_>) -> bool {
     match credential {
         // Empty means keyless; anything else must be printable.
-        ProviderCredential::Bearer(token) => {
-            token.bytes().all(|byte| byte.is_ascii_graphic())
-        }
+        ProviderCredential::Bearer(token) => token.bytes().all(|byte| byte.is_ascii_graphic()),
         // Web never sends x-api-key for a custom connection.
         ProviderCredential::XApiKey(_) => false,
     }

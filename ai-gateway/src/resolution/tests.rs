@@ -861,6 +861,96 @@ async fn accepts_keyless_custom_connections_with_empty_bearer_token() {
 }
 
 #[tokio::test]
+async fn accepts_ordered_fallback_connections() {
+    // An alias resolves to several targets; each carries its own upstream
+    // model, and every one must satisfy the per-target rules.
+    let mut body = success("project-1", "provider-token");
+    body["connection"]["api_format"] = json!("openai.chat-completions");
+    body["fallbacks"] = json!([
+        {"id": "connection-2", "name": "secondary", "provider": "custom",
+         "provider_model": "GLM-5.3-Flash", "api_format": "openai.chat-completions",
+         "base_url": "http://10.3.24.39:8000/v1", "auth": {"type": "Bearer", "token": ""}},
+        {"id": "connection-3", "provider": "openai",
+         "provider_model": "gpt-4.1", "api_format": "openai.chat-completions",
+         "base_url": "https://api.openai.com/v1", "auth": {"type": "Bearer", "token": "k"}}
+    ]);
+    let web = FakeWeb::start(move |_| {
+        let body = body.clone();
+        async move { response(body) }
+    })
+    .await;
+    let context = web
+        .control_plane()
+        .resolve_at(
+            GATEWAY_KEY,
+            ApiFormat::OpenAiChatCompletions,
+            "glm-5.3",
+            NOW_TIME,
+            REQUEST_ID,
+        )
+        .await
+        .unwrap();
+    assert_eq!(context.fallbacks().len(), 2);
+    assert_eq!(context.fallbacks()[0].id(), "connection-2");
+    assert_eq!(context.fallbacks()[1].provider_model(), "gpt-4.1");
+}
+
+#[tokio::test]
+async fn rejects_an_invalid_fallback_target() {
+    // One broken target invalidates the whole resolution: the gateway cannot
+    // know Web meant the earlier targets to be usable.
+    let mutations = [
+        // A wrong format: the fallback would not serve this request.
+        |body: &mut Value| body["fallbacks"][0]["api_format"] = json!("anthropic.messages"),
+        // A non-http(s) origin: decode is syntactic; reachability is the
+        // egress policy's job (see egress::tests).
+        |body: &mut Value| body["fallbacks"][0]["base_url"] = json!("ftp://10.3.24.39:8000/v1"),
+        // A credential scheme the provider does not accept.
+        |body: &mut Value| {
+            body["fallbacks"][0]["auth"] =
+                json!({"type": "x-api-key", "header": "x-api-key", "value": "k"});
+        },
+        // An empty upstream model.
+        |body: &mut Value| body["fallbacks"][0]["provider_model"] = json!("  "),
+    ];
+    for mutate in mutations {
+        let mut body = success("project-1", "provider-token");
+        body["connection"]["api_format"] = json!("openai.chat-completions");
+        body["fallbacks"] = json!([
+            {"id": "connection-2", "provider": "custom",
+             "provider_model": "GLM-5.3-Flash", "api_format": "openai.chat-completions",
+             "base_url": "http://10.3.24.39:8000/v1", "auth": {"type": "Bearer", "token": ""}}
+        ]);
+        mutate(&mut body);
+        assert_invalid_context_for(body, ApiFormat::OpenAiChatCompletions).await;
+    }
+}
+
+#[tokio::test]
+async fn tolerates_a_web_that_sends_no_fallbacks() {
+    // The field is optional: an older Web keeps resolving single connections.
+    let body = success("project-1", "provider-token");
+
+    let web = FakeWeb::start(move |_| {
+        let body = body.clone();
+        async move { response(body) }
+    })
+    .await;
+    let context = web
+        .control_plane()
+        .resolve_at(
+            GATEWAY_KEY,
+            ApiFormat::OpenAiResponses,
+            "primary:gpt-4.1",
+            NOW_TIME,
+            REQUEST_ID,
+        )
+        .await
+        .unwrap();
+    assert!(context.fallbacks().is_empty());
+}
+
+#[tokio::test]
 async fn rejects_incompatible_or_incomplete_execution_contexts() {
     let mutations = [
         ("/version", json!(2)),

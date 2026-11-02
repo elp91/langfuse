@@ -314,6 +314,10 @@ impl IngestionGrant {
 struct ResolutionResponse {
     version: u8,
     connection: ProviderConnection,
+    /// Lower-priority targets for the same model, in failover order. Absent or
+    /// empty keeps single-connection behavior; Web only sends it for aliases.
+    #[serde(default)]
+    fallbacks: Vec<ProviderConnection>,
     attribution: RequestAttribution,
     #[serde(deserialize_with = "string_enum")]
     ingestion_mode: IngestionMode,
@@ -338,6 +342,11 @@ fn string_enum<'de, D: Deserializer<'de>, T: DeserializeOwned>(
 impl ResolvedRequestContext {
     pub fn connection(&self) -> &ProviderConnection {
         &self.0.connection
+    }
+    /// Ordered fallback targets for the same model, primary first. Empty when
+    /// Web resolved a plain connection.
+    pub fn fallbacks(&self) -> &[ProviderConnection] {
+        &self.0.fallbacks
     }
     pub fn attribution(&self) -> &RequestAttribution {
         &self.0.attribution
@@ -417,18 +426,9 @@ pub(super) fn decode(
         serde_json::from_slice(bytes).map_err(|_| ResolutionError::InvalidResponse)?;
     let connection = &response.connection;
     let attribution = &response.attribution;
-    let provider = connection.provider;
     if response.version != 1
         || connection.api_format != expected_format
-        || !provider.supports(connection.api_format)
-        || !valid_connection_origin(&connection.base_url)
-        // A custom connection may omit its key entirely; the other providers
-        // always carry one.
-        || (provider != Provider::Custom
-            && (!provider.accepts(connection.credential())
-                || !valid_token(connection.credential().secret())))
-        || (provider == Provider::Custom
-            && !valid_optional_token(connection.credential()))
+        || !valid_target(connection, expected_format)
         || !valid_ingestion(&response, now)
         || [
             connection.id.as_str(),
@@ -444,7 +444,36 @@ pub(super) fn decode(
     {
         return Err(ResolutionError::InvalidResponse);
     }
+    if response
+        .fallbacks
+        .iter()
+        .any(|fallback| !valid_target(fallback, expected_format))
+    {
+        return Err(ResolutionError::InvalidResponse);
+    }
     Ok(ResolvedRequestContext(response))
+}
+
+/// The per-target rules: format agreement, origin validity, and a credential
+/// scheme the provider accepts. The primary connection additionally bounds the
+/// attribution; fallbacks share it.
+fn valid_target(connection: &ProviderConnection, expected_format: ApiFormat) -> bool {
+    let provider = connection.provider;
+    connection.api_format == expected_format
+        && provider.supports(connection.api_format)
+        && valid_connection_origin(&connection.base_url)
+        // A custom connection may omit its key entirely; the other providers
+        // always carry one.
+        && match provider {
+            // A custom connection may omit its key entirely; the other
+            // providers always carry one.
+            Provider::Custom => valid_optional_token(connection.credential()),
+            _ => {
+                provider.accepts(connection.credential())
+                    && valid_token(connection.credential().secret())
+            }
+        }
+        && !connection.provider_model.trim().is_empty()
 }
 
 /// The origin Web vouches for must be a syntactic http or https origin with no

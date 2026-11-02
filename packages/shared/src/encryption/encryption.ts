@@ -38,7 +38,8 @@ export function decrypt(text: string): string {
     throw new Error("Missing environment variable: `ENCRYPTION_KEY`");
   }
   const [ivHex, encryptedHex, authTagHex] = text.split(":");
-  if (!ivHex || !encryptedHex || !authTagHex) {
+  // encrypt("") emits an empty ciphertext between the separators.
+  if (!ivHex || encryptedHex === undefined || !authTagHex) {
     throw new Error("Invalid or corrupted cipher format");
   }
 
