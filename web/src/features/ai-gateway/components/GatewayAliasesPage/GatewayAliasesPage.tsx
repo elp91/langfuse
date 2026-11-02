@@ -11,6 +11,7 @@ import type { LangfuseColumnDef } from "@/src/components/table/types";
 import { Button } from "@/src/components/ui/button";
 import { Skeleton } from "@/src/components/ui/skeleton";
 import { BadgeShell } from "@/src/components/design-system/Badge/Badge";
+import { Tooltip } from "@/src/components/design-system/Tooltip/Tooltip";
 import { AliasDialogController } from "@/src/features/ai-gateway/components/GatewayAliasesPage/components/AliasDialogController";
 import { GatewayNotDeployedNotice } from "@/src/features/ai-gateway/components/GatewayNotDeployedNotice/GatewayNotDeployedNotice";
 import { GatewaySetupEmptyState } from "@/src/features/ai-gateway/components/GatewaySetupEmptyState/GatewaySetupEmptyState";
@@ -125,27 +126,50 @@ function ConnectedGatewayAliasesTable({
         <div className="flex flex-col items-start gap-1.5">
           {row.original.targets.map((target, index) => {
             const ProviderIcon = providerIcons[target.connectionProvider];
+            /** A target serves only through a healthy connection; the badge
+             * colour tells whether the fallback chain stops here or skips. */
+            const badgeColor =
+              target.connectionStatus === "ENABLED"
+                ? "green"
+                : target.connectionStatus === "DISABLED"
+                  ? "yellow"
+                  : "red";
+            const statusHint =
+              target.connectionStatus === "ENABLED"
+                ? "will serve requests"
+                : target.connectionStatus === "DISABLED"
+                  ? "is disabled; requests fall through to the next target"
+                  : "errored; requests fall through to the next target";
             return (
               <span
                 key={target.id}
                 className="flex flex-col items-start gap-0.5"
               >
-                <BadgeShell
-                  color="filled"
-                  aria-label={`Target ${index + 1}: ${target.connectionName}, upstream model ${target.providerModel}`}
+                <Tooltip
+                  label={`Target ${index + 1} — ${target.connectionName} ${statusHint}`}
                 >
-                  <ProviderIcon aria-hidden size="sm" />
-                  <span
-                    className="truncate py-0.5"
-                    title={target.connectionName}
-                  >
-                    {target.connectionName}
-                  </span>
-                  <span className="text-muted-foreground">·</span>
-                  <span className="font-mono text-xs">
-                    {target.providerModel}
-                  </span>
-                </BadgeShell>
+                  {({ getTriggerProps }) => (
+                    <span
+                      {...getTriggerProps()}
+                      tabIndex={0}
+                      className="focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-hidden"
+                    >
+                      <BadgeShell color={badgeColor}>
+                        <ProviderIcon aria-hidden size="sm" />
+                        <span
+                          className="truncate py-0.5"
+                          title={target.connectionName}
+                        >
+                          {target.connectionName}
+                        </span>
+                        <span className="text-muted-foreground">·</span>
+                        <span className="font-mono text-xs">
+                          {target.providerModel}
+                        </span>
+                      </BadgeShell>
+                    </span>
+                  )}
+                </Tooltip>
                 {/** Targets stack in fallback order; the arrow points from
                  * each badge down to the next one. */}
                 {index < row.original.targets.length - 1 ? (

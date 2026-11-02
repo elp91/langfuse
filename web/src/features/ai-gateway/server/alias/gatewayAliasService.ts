@@ -41,6 +41,7 @@ export type GatewayAliasTargetDto = {
   connectionId: string;
   connectionName: string;
   connectionProvider: GatewayProvider;
+  connectionStatus: "ENABLED" | "ERROR" | "DISABLED";
   providerModel: string;
   position: number;
 };
@@ -78,7 +79,9 @@ export class GatewayAliasService {
             connectionId: true,
             providerModel: true,
             position: true,
-            connection: { select: { name: true, provider: true } },
+            connection: {
+              select: { name: true, provider: true, status: true },
+            },
           },
         },
       },
@@ -93,6 +96,7 @@ export class GatewayAliasService {
         connectionId: target.connectionId,
         connectionName: target.connection.name,
         connectionProvider: target.connection.provider,
+        connectionStatus: target.connection.status,
         providerModel: target.providerModel,
         position: target.position,
       })),

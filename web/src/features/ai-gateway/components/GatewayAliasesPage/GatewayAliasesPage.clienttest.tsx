@@ -18,6 +18,7 @@ const aliases = [
         connectionId: "conn-1",
         connectionName: "OpenAI",
         connectionProvider: "OPENAI" as const,
+        connectionStatus: "ENABLED" as const,
         providerModel: "gpt-4.1",
         position: 0,
       },
