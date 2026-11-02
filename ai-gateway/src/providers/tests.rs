@@ -8,6 +8,7 @@ use axum::{
     http::{HeaderName, StatusCode},
 };
 use futures_util::{StreamExt, stream};
+use serde_json::json;
 use std::{convert::Infallible, future::pending, sync::Arc};
 use tokio::sync::Notify;
 
@@ -1248,4 +1249,312 @@ fn assert_chat_upload(payload: &serde_json::Value, request: &str) {
     ] {
         assert!(!payload.to_string().contains(secret));
     }
+}
+
+/// Matches resolution/tests.rs: the pinned signing instant and a grant that
+/// outlives it.
+const RESOLVE_NOW: u64 = 1_800_000_000;
+const RESOLVE_TIME: Duration = Duration::from_secs(RESOLVE_NOW);
+
+/// A fake Web whose resolution points the primary connection at `dead_base_url`
+/// and one fallback at `fallback_base_url`. The transport dials the connection's
+/// own origin, so both targets go to real loopback sockets: the dead one is a
+/// port with nothing listening behind it.
+async fn fallback_context(
+    dead_base_url: String,
+    fallback_base_url: String,
+) -> ResolvedRequestContext {
+    // The grant must outlive the pinned signing instant.
+    let expires_at = RESOLVE_NOW + 300;
+    let body = json!({
+        "version": 1,
+        "connection": {
+            "id": "connection-dead",
+            "name": "Dead primary",
+            "provider": "custom",
+            "provider_model": "dead-model",
+            "api_format": "openai.chat-completions",
+            "base_url": dead_base_url,
+            "auth": {"type": "Bearer", "token": ""}
+        },
+        "fallbacks": [{
+            "id": "connection-live",
+            "name": "Live fallback",
+            "provider": "custom",
+            "provider_model": "live-model",
+            "api_format": "openai.chat-completions",
+            "base_url": fallback_base_url,
+            "auth": {"type": "Bearer", "token": ""}
+        }],
+        "attribution": {
+            "organization_id": "org-1",
+            "project_id": "project-1",
+            "key_id": "key-1",
+            "user_id": "user-1",
+            "key_metadata": {},
+            "provider_connection_id": "connection-dead"
+        },
+        "ingestion_mode": "usage",
+        "ingestion": {
+            "access_token": ingestion_token("org-1", "project-1"),
+            "token_type": "Bearer",
+            "expires_at": expires_at
+        }
+    });
+    let web = FakeServer::start(move |_| {
+        let body = body.clone();
+        async move {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        }
+    })
+    .await;
+    web.control_plane()
+        .resolve_at(
+            "gw_test_alice",
+            ApiFormat::OpenAiChatCompletions,
+            "alias-5.3",
+            RESOLVE_TIME,
+            "0b0c3b5e-6d7a-4f1e-9c2d-8a1b2c3d4e5f",
+        )
+        .await
+        .unwrap()
+}
+
+/// Bind a loopback port and drop the listener: dialing it refuses until the OS
+/// hands the port to another test, which is exactly the dead-target behavior.
+async fn dead_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    port
+}
+
+/// A transport that dials each connection's own `base_url` (no test override,
+/// no egress policy): the two targets hit real loopback sockets.
+fn fallback_relay() -> ProviderTransport {
+    ProviderTransport::with_limits(ProviderLimits::default()).unwrap()
+}
+
+fn chat_request() -> RequestBody {
+    let body = Bytes::from_static(br#"{"model":"requested"}"#);
+    RequestBody {
+        model_range: model_range(&body).unwrap(),
+        bytes: body,
+        streaming: true,
+        reservation: None,
+    }
+}
+
+#[tokio::test]
+async fn fails_over_from_a_dead_target_to_the_live_fallback() {
+    let dead = dead_port().await;
+    let live = FakeServer::start(|request| async move {
+        assert_eq!(request.uri(), "/v1/chat/completions");
+        // The fallback target's own upstream model, rewritten from the caller's.
+        assert!(!request.headers().contains_key(header::AUTHORIZATION));
+        let upstream_body = to_bytes(request.into_body(), 1024).await.unwrap();
+        assert_eq!(upstream_body, &br#"{"model":"live-model"}"#[..]);
+        Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"id":"resp-live"}"#))
+            .unwrap()
+    })
+    .await;
+    let context = fallback_context(
+        format!("http://127.0.0.1:{dead}/v1"),
+        format!("{}/v1", live.url),
+    )
+    .await;
+    let relay = fallback_relay();
+    let response = relay
+        .forward_route(
+            relay.admit(),
+            context,
+            &HeaderMap::new(),
+            chat_request(),
+            Route::OpenAiChatCompletions,
+            &mut RequestCorrelation::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(live.calls(), 1);
+}
+
+#[tokio::test]
+async fn fails_over_on_rate_limit_and_server_errors() {
+    let live = FakeServer::start(|_| async {
+        Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"id":"resp-live"}"#))
+            .unwrap()
+    })
+    .await;
+    let live_url = format!("{}/v1", live.url);
+    for status in [429u16, 500, 502, 503] {
+        let served_before = live.calls();
+        let failing = FakeServer::start(move |_| async move {
+            Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"id":"resp-failing"}"#))
+                .unwrap()
+        })
+        .await;
+        let context = fallback_context(format!("{}/v1", failing.url), live_url.clone()).await;
+        let relay = fallback_relay();
+        let response = relay
+            .forward_route(
+                relay.admit(),
+                context,
+                &HeaderMap::new(),
+                chat_request(),
+                Route::OpenAiChatCompletions,
+                &mut RequestCorrelation::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "status {status}");
+        assert_eq!(failing.calls(), 1);
+        assert_eq!(live.calls(), served_before + 1, "status {status}");
+    }
+}
+
+#[tokio::test]
+async fn a_caller_error_is_returned_without_failing_over() {
+    let live = FakeServer::start(|_| async { Response::new(Body::empty()) }).await;
+    let live_url = format!("{}/v1", live.url);
+    let failing = FakeServer::start(|_| async {
+        Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":{"message":"unknown model"}}"#))
+            .unwrap()
+    })
+    .await;
+    let context = fallback_context(format!("{}/v1", failing.url), live_url).await;
+    let relay = fallback_relay();
+    let response = relay
+        .forward_route(
+            relay.admit(),
+            context,
+            &HeaderMap::new(),
+            chat_request(),
+            Route::OpenAiChatCompletions,
+            &mut RequestCorrelation::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(failing.calls(), 1);
+    assert_eq!(live.calls(), 0);
+}
+
+#[tokio::test]
+async fn a_midstream_failure_never_fails_over() {
+    let live = FakeServer::start(|_| async { Response::new(Body::empty()) }).await;
+    let live_url = format!("{}/v1", live.url);
+    // The chunk must reach the client before the stream errors, or hyper never
+    // sends response headers at all and the failure looks like a connect error.
+    let failing = FakeServer::start(|_| async move {
+        let chunks = stream::iter([Ok::<_, std::io::Error>("data: partial\n\n".to_owned())]).chain(
+            stream::once(async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Err::<String, std::io::Error>(std::io::Error::other("reset"))
+            }),
+        );
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(chunks))
+            .unwrap()
+    })
+    .await;
+    let context = fallback_context(format!("{}/v1", failing.url), live_url).await;
+    let relay = fallback_relay();
+    let response = relay
+        .forward_route(
+            relay.admit(),
+            context,
+            &HeaderMap::new(),
+            chat_request(),
+            Route::OpenAiChatCompletions,
+            &mut RequestCorrelation::default(),
+        )
+        .await
+        .unwrap();
+    // Headers were accepted: the response is terminal, the stream error is not
+    // retried against the fallback.
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, "data: partial\n\n");
+    let error = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .unwrap()
+        .expect("stream must yield the midstream error before EOF");
+    assert!(error.is_err());
+    assert_eq!(failing.calls(), 1);
+    assert_eq!(live.calls(), 0);
+}
+
+#[tokio::test]
+async fn an_open_breaker_skips_its_target() {
+    let live = FakeServer::start(|_| async {
+        Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"id":"resp-live"}"#))
+            .unwrap()
+    })
+    .await;
+    let live_url = format!("{}/v1", live.url);
+    let failing = FakeServer::start(|_| async {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::empty())
+            .unwrap()
+    })
+    .await;
+    let relay = fallback_relay();
+    // The breaker's threshold is 3: three requests exhaust it, and only the
+    // live fallback ever serves.
+    for _ in 0..3 {
+        let context = fallback_context(format!("{}/v1", failing.url), live_url.clone()).await;
+        let response = relay
+            .forward_route(
+                relay.admit(),
+                context,
+                &HeaderMap::new(),
+                chat_request(),
+                Route::OpenAiChatCompletions,
+                &mut RequestCorrelation::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(failing.calls(), 3);
+    assert_eq!(live.calls(), 3);
+    // The fourth request skips the dead target entirely.
+    let context = fallback_context(format!("{}/v1", failing.url), live_url).await;
+    let response = relay
+        .forward_route(
+            relay.admit(),
+            context,
+            &HeaderMap::new(),
+            chat_request(),
+            Route::OpenAiChatCompletions,
+            &mut RequestCorrelation::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(failing.calls(), 3);
+    assert_eq!(live.calls(), 4);
 }

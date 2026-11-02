@@ -207,7 +207,9 @@ impl ControlPlaneClient {
             .await
     }
 
-    async fn resolve_at(
+    /// Like [`Self::resolve`], but the caller pins the signing timestamp, so
+    /// tests can assert the exact signature. Crate-visible for that reason.
+    pub(crate) async fn resolve_at(
         &self,
         gateway_key: &str,
         api_format: ApiFormat,

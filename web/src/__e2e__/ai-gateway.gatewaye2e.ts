@@ -3,7 +3,6 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
-import { createServer as createHttpServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,10 +45,6 @@ const ORGANIZATION_ID =
   process.env.LANGFUSE_AI_GATEWAY_E2E_ORGANIZATION_ID ?? "seed-org-id";
 const PROJECT_ID_OVERRIDE = process.env.LANGFUSE_AI_GATEWAY_E2E_PROJECT_ID;
 const DEFAULT_PROJECT_ID = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
-// The gateway reserves loopback for its own control plane, so the fallback
-// test's fake upstream must bind a non-loopback private address instead.
-const fallbackUpstreamHost =
-  process.env.LANGFUSE_AI_GATEWAY_E2E_UPSTREAM_HOST ?? "";
 const RESOLVE_PATH = "/api/internal/ai-gateway/v1/resolve";
 const TEST_TIMEOUT_MS = 120_000;
 const PROVIDER_CREDENTIALS: Partial<Record<GatewayProviderName, string>> = {
@@ -645,169 +640,6 @@ describe("AI gateway live end-to-end", () => {
       TEST_TIMEOUT_MS,
     );
   });
-
-  describe("alias fallback", () => {
-    const FALLBACK_ALIAS = "e2e-fallback-alias";
-    let liveUpstream: { url: string; close: () => Promise<void> } | null = null;
-    let deadPort: number;
-    const createdConnectionIdsForFallback: string[] = [];
-    const createdAliasIds: string[] = [];
-
-    beforeAll(async () => {
-      // A minimal OpenAI-compatible upstream the second target points at.
-      const server = createHttpServer((request, response) => {
-        let raw = "";
-        request.on("data", (chunk) => {
-          raw += chunk;
-        });
-        request.on("end", () => {
-          const parsed = JSON.parse(raw || "{}") as { model?: string };
-          response.setHeader("Content-Type", "application/json");
-          response.end(
-            JSON.stringify({
-              id: "chatcmpl-e2e-fallback",
-              object: "chat.completion",
-              created: Math.floor(Date.now() / 1000),
-              model: parsed.model ?? "fallback-model",
-              choices: [
-                {
-                  index: 0,
-                  message: { role: "assistant", content: "fallback ok" },
-                  finish_reason: "stop",
-                },
-              ],
-              usage: {
-                prompt_tokens: 1,
-                completion_tokens: 2,
-                total_tokens: 3,
-              },
-            }),
-          );
-        });
-      });
-      // The gateway reserves loopback for its control plane, so the fake
-      // upstream must bind a non-loopback private address; the spawned
-      // gateway exempts it below.
-      if (!fallbackUpstreamHost) {
-        throw new Error(
-          "Set LANGFUSE_AI_GATEWAY_E2E_UPSTREAM_HOST to a non-loopback private IPv4 of this host before running the fallback test.",
-        );
-      }
-      const upstreamHost = fallbackUpstreamHost;
-      const listenReady = Promise.withResolvers<number>();
-      server.listen(0, upstreamHost, () => {
-        const address = server.address();
-        listenReady.resolve(
-          typeof address === "object" && address ? address.port : 0,
-        );
-      });
-      const listenPort = await listenReady.promise;
-      liveUpstream = {
-        url: `http://${upstreamHost}:${listenPort}/v1`,
-        close: () => {
-          const closed = Promise.withResolvers<void>();
-          server.close((error) =>
-            error ? closed.reject(error) : closed.resolve(),
-          );
-          return closed.promise;
-        },
-      };
-      deadPort = await reserveUnroutablePort(upstreamHost);
-
-      const dead = await prisma.gatewayAiConnection.create({
-        data: {
-          organizationId: ORGANIZATION_ID,
-          name: "e2e fallback dead",
-          provider: GatewayProvider.CUSTOM,
-          baseUrl: `http://127.0.0.1:${deadPort}/v1`,
-          encryptedCredential: encrypt(""),
-          displaySecret: getDisplaySecretKey(""),
-          status: GatewayConnectionStatus.ENABLED,
-        },
-      });
-      const live = await prisma.gatewayAiConnection.create({
-        data: {
-          organizationId: ORGANIZATION_ID,
-          name: "e2e fallback live",
-          provider: GatewayProvider.CUSTOM,
-          baseUrl: liveUpstream.url,
-          encryptedCredential: encrypt(""),
-          displaySecret: getDisplaySecretKey(""),
-          status: GatewayConnectionStatus.ENABLED,
-        },
-      });
-      createdConnectionIdsForFallback.push(dead.id, live.id);
-
-      const alias = await admin.caller.aiGateway.upsertAlias({
-        orgId: ORGANIZATION_ID,
-        name: FALLBACK_ALIAS,
-        targets: [
-          { connectionId: dead.id, providerModel: "dead-model" },
-          { connectionId: live.id, providerModel: "live-model" },
-        ],
-      });
-      createdAliasIds.push(alias.id);
-    }, 30_000);
-
-    afterAll(async () => {
-      try {
-        if (createdAliasIds.length > 0) {
-          for (const id of createdAliasIds) {
-            await prisma.gatewayAiAlias
-              .deleteMany({ where: { id } })
-              .catch(() => null);
-          }
-        }
-      } finally {
-        await prisma.gatewayAiConnection.deleteMany({
-          where: { id: { in: createdConnectionIdsForFallback } },
-        });
-        await liveUpstream?.close();
-      }
-    }, 20_000);
-
-    it(
-      "fails over from a dead first target to the live second",
-      async () => {
-        const gatewayKey = await admin.caller.aiGateway.createApiKey({
-          orgId: ORGANIZATION_ID,
-          name: `Gateway E2E fallback ${FALLBACK_ALIAS}`,
-          metadata: { test: true },
-        });
-        apiKeyIds.add(gatewayKey.id);
-        try {
-          const requestPath = "/openai/v1/chat/completions";
-          const response = await fetch(`${gatewayBaseUrl}${requestPath}`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${gatewayKey.secretKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: FALLBACK_ALIAS,
-              messages: [{ role: "user", content: "hello" }],
-              max_tokens: 8,
-            }),
-          });
-          const text = await response.text();
-          expect(response.status, text).toBe(200);
-          const payload = JSON.parse(text) as { model?: string };
-          // The second target's own upstream model served the request.
-          expect(payload.model).toBe("live-model");
-
-          const traceId = response.headers.get("langfuse-trace-id");
-          expect(traceId).toMatch(/^[0-9a-f]{32}$/);
-        } finally {
-          await admin.caller.aiGateway.revokeApiKey({
-            orgId: ORGANIZATION_ID,
-            id: gatewayKey.id,
-          });
-          apiKeyIds.delete(gatewayKey.id);
-        }
-      },
-      TEST_TIMEOUT_MS,
-    );
-  });
 });
 
 async function withGatewayApiKey(
@@ -1375,26 +1207,6 @@ function reserveLoopbackPort() {
   });
 }
 
-function reserveUnroutablePort(host: string) {
-  return new Promise<number>((resolve, reject) => {
-    const server = createHttpServer();
-    server.once("error", reject);
-    server.listen(0, host, () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close();
-        reject(new Error("Could not reserve a fallback port"));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(port);
-      });
-    });
-  });
-}
-
 async function startGatewayProcess() {
   if (!env.LANGFUSE_AI_GATEWAY_SERVICE_KEY) {
     throw new Error(
@@ -1419,9 +1231,6 @@ async function startGatewayProcess() {
       LANGFUSE_AI_GATEWAY_LISTEN_ADDRESS: `127.0.0.1:${port}`,
       LANGFUSE_AI_GATEWAY_AUTO_INCREMENT_LISTEN_PORT: "false",
       LANGFUSE_AI_GATEWAY_CONNECTION_DRAIN_TIMEOUT_SECONDS: "5",
-      // The fake fallback upstream is a private non-loopback literal; exempt
-      // it from the built-in private-address block regardless of the env.
-      LANGFUSE_AI_GATEWAY_WHITELISTED_IP_SEGMENTS: `${fallbackUpstreamHost}/32`,
       LANGFUSE_LOG_FORMAT: "json",
       LANGFUSE_LOG_LEVEL: "info",
     },
