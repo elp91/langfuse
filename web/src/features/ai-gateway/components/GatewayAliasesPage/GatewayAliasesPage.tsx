@@ -130,9 +130,6 @@ function ConnectedGatewayAliasesTable({
                 key={target.id}
                 className="inline-flex items-center gap-1.5"
               >
-                {index > 0 ? (
-                  <span className="text-muted-foreground text-xs">→</span>
-                ) : null}
                 <BadgeShell
                   color="filled"
                   aria-label={`Target ${index + 1}: ${target.connectionName}, upstream model ${target.providerModel}`}
@@ -149,6 +146,11 @@ function ConnectedGatewayAliasesTable({
                     {target.providerModel}
                   </span>
                 </BadgeShell>
+                {/** The arrow trails each badge: read as "this one, then the
+                 * next", instead of pointing at the badge it precedes. */}
+                {index < row.original.targets.length - 1 ? (
+                  <span className="text-muted-foreground text-xs">→</span>
+                ) : null}
               </span>
             );
           })}
