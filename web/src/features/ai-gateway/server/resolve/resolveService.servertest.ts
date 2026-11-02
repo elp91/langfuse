@@ -227,6 +227,49 @@ describe("GatewayResolveService", () => {
     });
   });
 
+  it("sends a keyless custom connection's empty token as the Bearer credential", async () => {
+    const service = serviceWith(() =>
+      Promise.resolve({
+        ...row({ metadata: {} }),
+        organization: {
+          gatewayConfig: {
+            defaultIngestionProjectId: "project-1",
+            ingestionMode: "USAGE",
+            defaultIngestionProject: {
+              id: "project-1",
+              orgId: "org-1",
+              deletedAt: null,
+            },
+          },
+          gatewayAiAliases: [],
+          gatewayAiConnections: [
+            {
+              id: "connection-3",
+              name: "keyless vllm",
+              provider: "CUSTOM",
+              baseUrl: "http://10.3.24.39:8000/v1",
+              encryptedCredential: null,
+              allowedModels: null,
+            },
+          ],
+        },
+      }),
+    );
+
+    await expect(
+      service.resolve({
+        fastHashedSecretKey: "hashed-secret-key",
+        apiFormat: "openai.chat-completions",
+        model: "keyless vllm:GLM-5.3",
+      }),
+    ).resolves.toMatchObject({
+      connection: {
+        provider: "custom",
+        auth: { type: "Bearer", token: "" },
+      },
+    });
+  });
+
   it("drops key metadata that is not a flat object of scalars", async () => {
     const service = serviceWith(() =>
       Promise.resolve(row({ metadata: [{ team: "platform" }] })),

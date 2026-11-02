@@ -405,7 +405,10 @@ fn valid_token(value: &str) -> bool {
 /// Authorization header for it.
 fn valid_optional_token(credential: ProviderCredential<'_>) -> bool {
     match credential {
-        ProviderCredential::Bearer(token) => valid_token(token),
+        // Empty means keyless; anything else must be printable.
+        ProviderCredential::Bearer(token) => {
+            token.bytes().all(|byte| byte.is_ascii_graphic())
+        }
         // Web never sends x-api-key for a custom connection.
         ProviderCredential::XApiKey(_) => false,
     }

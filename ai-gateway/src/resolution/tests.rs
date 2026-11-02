@@ -828,6 +828,39 @@ async fn rejects_connections_whose_provider_format_origin_and_credential_disagre
 }
 
 #[tokio::test]
+async fn accepts_keyless_custom_connections_with_empty_bearer_token() {
+    // Web sends token "" for a keyless custom connection; the transport sends
+    // no Authorization header for it. The token must decode as present but
+    // empty, not fail validation.
+    let mut body = success("project-1", "private-provider-token");
+    body["connection"]["provider"] = json!("custom");
+    body["connection"]["api_format"] = json!("openai.chat-completions");
+    body["connection"]["base_url"] = json!("http://10.3.24.39:8000/v1");
+    body["connection"]["auth"] = json!({"type": "Bearer", "token": ""});
+    let web = FakeWeb::start(move |_| {
+        let body = body.clone();
+        async move { response(body) }
+    })
+    .await;
+    let context = web
+        .control_plane()
+        .resolve_at(
+            GATEWAY_KEY,
+            ApiFormat::OpenAiChatCompletions,
+            "glm-5.3",
+            NOW_TIME,
+            REQUEST_ID,
+        )
+        .await
+        .unwrap();
+    assert_eq!(context.connection().provider(), Provider::Custom);
+    assert!(matches!(
+        context.connection().credential(),
+        ProviderCredential::Bearer("")
+    ));
+}
+
+#[tokio::test]
 async fn rejects_incompatible_or_incomplete_execution_contexts() {
     let mutations = [
         ("/version", json!(2)),
