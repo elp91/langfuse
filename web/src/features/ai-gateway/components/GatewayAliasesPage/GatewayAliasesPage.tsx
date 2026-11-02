@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react";
 import { Plus, Trash2 } from "@langfuse/icons";
 
 import Header from "@/src/components/layouts/header";
@@ -5,6 +6,7 @@ import { Alert } from "@/src/components/design-system/Alert/Alert";
 import { ConfirmationDialogController } from "@/src/components/design-system/ConfirmationDialogController/ConfirmationDialogController";
 import { createStatusTableColumn } from "@/src/components/design-system/table/columns/createStatusTableColumn";
 import { createTextTableColumn } from "@/src/components/design-system/table/columns/createTextTableColumn";
+import { createTableColumn } from "@/src/components/design-system/table/columns/utils/createTableColumn";
 import type { AsyncTableData } from "@/src/components/design-system/table/Table";
 import { SettingsTable } from "@/src/components/SettingsTable/SettingsTable";
 import type { LangfuseColumnDef } from "@/src/components/table/types";
@@ -20,7 +22,98 @@ import { useGatewaySettingsAccess } from "@/src/features/ai-gateway/hooks/useGat
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { api, type RouterOutputs } from "@/src/utils/api";
 
-export type GatewayAliasRow = RouterOutputs["aiGateway"]["listAliases"][number];
+type GatewayAliasRow = RouterOutputs["aiGateway"]["listAliases"][number];
+
+type AliasTarget = GatewayAliasRow["targets"][number];
+
+/** Position of the first target whose connection will serve. */
+function firstHealthyTargetIndex(targets: AliasTarget[]): number {
+  return targets.findIndex(
+    (candidate) => candidate.connectionStatus === "ENABLED",
+  );
+}
+
+/** Only a target that can actually serve needs attention: the first healthy
+ * one is green; everything after it is grey until the targets above it fail.
+ * Errored and disabled connections are highlighted because they will not
+ * serve. */
+function targetBadgeColor(
+  target: AliasTarget,
+  index: number,
+  firstHealthyIndex: number,
+): NonNullable<ComponentProps<typeof BadgeShell>["color"]> {
+  if (target.connectionStatus !== "ENABLED") {
+    return target.connectionStatus === "DISABLED" ? "yellow" : "red";
+  }
+  return index === firstHealthyIndex ? "green" : "filled";
+}
+
+function targetStatusHint(
+  target: AliasTarget,
+  index: number,
+  firstHealthyIndex: number,
+): string {
+  if (target.connectionStatus === "ENABLED") {
+    return index === firstHealthyIndex
+      ? "will serve requests"
+      : "serves only when the targets above it fail";
+  }
+  return target.connectionStatus === "DISABLED"
+    ? "is disabled; requests fall through to the next target"
+    : "errored; requests fall through to the next target";
+}
+
+/** Targets stack in fallback order; the arrow points from each badge down to
+ * the next one. */
+function AliasTargetsCell({ targets }: { targets: AliasTarget[] }) {
+  const firstHealthyIndex = firstHealthyTargetIndex(targets);
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      {targets.map((target, index) => {
+        const ProviderIcon = providerIcons[target.connectionProvider];
+        return (
+          <span key={target.id} className="flex flex-col items-start gap-0.5">
+            <Tooltip
+              label={`Target ${index + 1}: ${target.connectionName} ${targetStatusHint(target, index, firstHealthyIndex)}`}
+            >
+              {({ getTriggerProps }) => (
+                <span
+                  {...getTriggerProps()}
+                  tabIndex={0}
+                  className="focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-hidden"
+                >
+                  <BadgeShell
+                    color={targetBadgeColor(target, index, firstHealthyIndex)}
+                  >
+                    <ProviderIcon aria-hidden size="sm" />
+                    <span
+                      className="truncate py-0.5"
+                      title={target.connectionName}
+                    >
+                      {target.connectionName}
+                    </span>
+                    <span className="text-muted-foreground">·</span>
+                    <span className="font-mono text-xs">
+                      {target.providerModel}
+                    </span>
+                  </BadgeShell>
+                </span>
+              )}
+            </Tooltip>
+            {index < targets.length - 1 ? (
+              <span
+                aria-hidden
+                className="text-muted-foreground ml-4 text-xs leading-none"
+              >
+                ↓
+              </span>
+            ) : null}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 export function GatewayAliasesPage({
   organizationId,
@@ -119,86 +212,14 @@ function ConnectedGatewayAliasesTable({
       getStatus: (value) => (value === "ENABLED" ? "active" : "inactive"),
       enableResizing: false,
     }),
-    {
+    createTableColumn<GatewayAliasRow, AliasTarget[]>({
       accessorKey: "targets",
       header: "Targets",
-      cell: ({ row }) => {
-        /** Position of the first target whose connection will serve. */
-        const firstHealthyIndex = row.original.targets.findIndex(
-          (candidate) => candidate.connectionStatus === "ENABLED",
-        );
-        return (
-          <div className="flex flex-col items-start gap-1.5">
-            {row.original.targets.map((target, index) => {
-              const ProviderIcon = providerIcons[target.connectionProvider];
-              /** Only a target that can actually serve needs attention: the
-               * first healthy one is green; everything after it is grey until
-               * the targets above it fail. Errored and disabled connections
-               * are highlighted because they will not serve. */
-              const badgeColor =
-                target.connectionStatus !== "ENABLED"
-                  ? target.connectionStatus === "DISABLED"
-                    ? "yellow"
-                    : "red"
-                  : index === firstHealthyIndex
-                    ? "green"
-                    : "filled";
-              const statusHint =
-                target.connectionStatus === "ENABLED"
-                  ? index === firstHealthyIndex
-                    ? "will serve requests"
-                    : "serves only when the targets above it fail"
-                  : target.connectionStatus === "DISABLED"
-                    ? "is disabled; requests fall through to the next target"
-                    : "errored; requests fall through to the next target";
-              return (
-                <span
-                  key={target.id}
-                  className="flex flex-col items-start gap-0.5"
-                >
-                  <Tooltip
-                    label={`Target ${index + 1}: ${target.connectionName} ${statusHint}`}
-                  >
-                    {({ getTriggerProps }) => (
-                      <span
-                        {...getTriggerProps()}
-                        tabIndex={0}
-                        className="focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-hidden"
-                      >
-                        <BadgeShell color={badgeColor}>
-                          <ProviderIcon aria-hidden size="sm" />
-                          <span
-                            className="truncate py-0.5"
-                            title={target.connectionName}
-                          >
-                            {target.connectionName}
-                          </span>
-                          <span className="text-muted-foreground">·</span>
-                          <span className="font-mono text-xs">
-                            {target.providerModel}
-                          </span>
-                        </BadgeShell>
-                      </span>
-                    )}
-                  </Tooltip>
-                  {/** Targets stack in fallback order; the arrow points from
-                   * each badge down to the next one. */}
-                  {index < row.original.targets.length - 1 ? (
-                    <span
-                      aria-hidden
-                      className="text-muted-foreground ml-4 text-xs leading-none"
-                    >
-                      ↓
-                    </span>
-                  ) : null}
-                </span>
-              );
-            })}
-          </div>
-        );
-      },
+      loadingCell: <Skeleton className="h-5 w-24 shrink-0 rounded-sm" />,
+      renderCell: (targets) =>
+        targets ? <AliasTargetsCell targets={targets} /> : null,
       enableResizing: false,
-    },
+    }),
   ];
 
   const toggleStatus = async (alias: GatewayAliasRow) => {

@@ -113,19 +113,9 @@ async fn resolver_keeps_only_permitted_addresses() {
     // address; the resolver errors rather than returning an empty iterator.
     let resolver = EgressResolver::new(restricted());
     let name = Name::from_str("localhost").unwrap();
-    let result = Resolve::resolve(&resolver, name).await;
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn resolver_permits_public_names() {
-    // The literal-IP check must not be applied to resolved names; a public
-    // hostname resolves and passes.
-    let resolver = EgressResolver::new(restricted());
-    let name = Name::from_str("localhost").unwrap();
     // localhost resolves to loopback everywhere, so it fails; a name resolving
-    // to a public address depends on the environment, so only assert the
-    // loopback refusal deterministically here.
+    // to a public address depends on the environment, so only the loopback
+    // refusal is asserted deterministically.
     let result = Resolve::resolve(&resolver, name).await;
     assert!(result.is_err());
 }

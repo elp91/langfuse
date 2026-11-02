@@ -53,15 +53,6 @@ impl Provider {
         }
     }
 
-    pub fn official_origin(self) -> &'static str {
-        match self {
-            Self::OpenAi => "https://api.openai.com/v1",
-            Self::Anthropic => "https://api.anthropic.com/v1",
-            // A custom connection's origin comes from Web, never the registry.
-            Self::Custom => "",
-        }
-    }
-
     fn supports(self, api_format: ApiFormat) -> bool {
         match self {
             Self::OpenAi => matches!(

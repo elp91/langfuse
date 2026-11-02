@@ -9,7 +9,7 @@ import { invalidateGatewayResolveCacheForOrganization } from "@/src/features/ai-
 const ALIAS_NAME_MAX_LENGTH = 128;
 const MAX_TARGETS = 10;
 
-export const aliasNameSchema = z
+const aliasNameSchema = z
   .string()
   .min(1)
   .max(ALIAS_NAME_MAX_LENGTH)
@@ -18,7 +18,7 @@ export const aliasNameSchema = z
     "Alias names may contain letters, digits, dots, underscores and hyphens",
   );
 
-export const aliasTargetSchema = z.object({
+const aliasTargetSchema = z.object({
   connectionId: z.string().min(1),
   providerModel: z.string().min(1).max(256),
 });
@@ -36,7 +36,7 @@ export type UpsertAliasInput = z.infer<typeof upsertAliasInputSchema>;
 import type { GatewayProvider } from "@/src/features/ai-gateway/types/gatewayProvider";
 
 /** Ordered upstream target of an alias; position is the fallback order. */
-export type GatewayAliasTargetDto = {
+type GatewayAliasTargetDto = {
   id: string;
   connectionId: string;
   connectionName: string;

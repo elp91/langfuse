@@ -30,6 +30,88 @@ type TargetDraft = {
   providerModel: string;
 };
 
+type ConnectionForPicker =
+  RouterOutputs["aiGateway"]["listModelConnections"][number];
+
+/** Model picker for one alias target: a combobox when the connection's
+ * catalog has models, a free-text input when it has none. A custom typed
+ * value is not in the catalog, so it is added to the options to keep it
+ * visible in the trigger. */
+function TargetModelPicker({
+  target,
+  index,
+  connections,
+  onProviderModelChange,
+}: {
+  target: TargetDraft;
+  index: number;
+  connections: ConnectionForPicker[];
+  onProviderModelChange: (value: string) => void;
+}) {
+  const connectionModels =
+    connections.find((connection) => connection.id === target.connectionId)
+      ?.models ?? [];
+  if (connectionModels.length === 0) {
+    return (
+      <Input
+        aria-label={`Target ${index + 1} model`}
+        placeholder="Upstream model, e.g. gpt-4.1"
+        value={target.providerModel}
+        onChange={(event) => onProviderModelChange(event.target.value)}
+      />
+    );
+  }
+  return (
+    <Combobox
+      aria-label={`Target ${index + 1} model`}
+      placeholder="Upstream model, e.g. gpt-4.1"
+      value={target.providerModel}
+      options={
+        target.providerModel && !connectionModels.includes(target.providerModel)
+          ? [
+              { value: target.providerModel, label: target.providerModel },
+              ...connectionModels.map((model) => ({
+                value: model,
+                label: model,
+              })),
+            ]
+          : connectionModels.map((model) => ({
+              value: model,
+              label: model,
+            }))
+      }
+      onValueChange={onProviderModelChange}
+      footer={({ search, close }) =>
+        customModelButton(search, close, () => {
+          onProviderModelChange(search);
+          close();
+        })
+      }
+    />
+  );
+}
+
+/** Offer to accept a search term the catalog does not list as the target's
+ * upstream model. */
+function customModelButton(
+  search: string,
+  close: () => void,
+  onUse: () => void,
+) {
+  if (!search) {
+    return null;
+  }
+  return (
+    <button
+      type="button"
+      className="hover:bg-accent w-full rounded-sm px-2 py-1.5 text-left text-xs"
+      onClick={onUse}
+    >
+      Use &quot;{search}&quot;
+    </button>
+  );
+}
+
 const ALIAS_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 const MAX_TARGETS = 10;
 
@@ -263,70 +345,14 @@ function AliasDialog({
                     search={{ placeholder: "Search connections" }}
                   />
                 </div>
-                {(() => {
-                  const connectionModels =
-                    connections.find(
-                      (connection) => connection.id === target.connectionId,
-                    )?.models ?? [];
-                  if (connectionModels.length === 0) {
-                    return (
-                      <Input
-                        aria-label={`Target ${index + 1} model`}
-                        placeholder="Upstream model, e.g. gpt-4.1"
-                        value={target.providerModel}
-                        onChange={(event) =>
-                          updateTarget(index, {
-                            providerModel: event.target.value,
-                          })
-                        }
-                      />
-                    );
+                <TargetModelPicker
+                  target={target}
+                  index={index}
+                  connections={connections}
+                  onProviderModelChange={(value) =>
+                    updateTarget(index, { providerModel: value })
                   }
-                  return (
-                    <Combobox
-                      aria-label={`Target ${index + 1} model`}
-                      placeholder="Upstream model, e.g. gpt-4.1"
-                      value={target.providerModel}
-                      options={
-                        // A custom typed value is not in the catalog; add it
-                        // so the trigger shows it instead of the placeholder.
-                        target.providerModel &&
-                        !connectionModels.includes(target.providerModel)
-                          ? [
-                              {
-                                value: target.providerModel,
-                                label: target.providerModel,
-                              },
-                              ...connectionModels.map((model) => ({
-                                value: model,
-                                label: model,
-                              })),
-                            ]
-                          : connectionModels.map((model) => ({
-                              value: model,
-                              label: model,
-                            }))
-                      }
-                      onValueChange={(value) =>
-                        updateTarget(index, { providerModel: value })
-                      }
-                      footer={({ search, close }) =>
-                        search && !connectionModels.includes(search) ? (
-                          <button
-                            type="button"
-                            className="hover:bg-accent w-full rounded-sm px-2 py-1.5 text-left text-xs"
-                            onClick={() => {
-                              updateTarget(index, { providerModel: search });
-                              close();
-                            }}
-                          >
-                            Use &quot;{search}&quot;
-                          </button>
-                        ) : null
-                      }
-                    />
-                  );
-                })()}
+                />
                 <Button
                   variant="ghost"
                   size="sm"

@@ -572,11 +572,11 @@ async function seedAiGateway(params: {
     },
   });
 
-  if (
+  const hasGatewayConnections =
     (await prisma.gatewayAiConnection.count({
       where: { organizationId: params.organizationId },
-    })) === 0
-  ) {
+    })) > 0;
+  if (!hasGatewayConnections) {
     await prisma.gatewayAiConnection.createMany({
       data: [
         {
@@ -643,6 +643,7 @@ async function seedAiGateway(params: {
   });
 
   if (
+    hasGatewayConnections &&
     (await prisma.gatewayAiAlias.count({
       where: { organizationId: params.organizationId },
     })) === 0

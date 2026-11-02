@@ -897,6 +897,7 @@ describe("AI gateway control plane", () => {
           provider: "OPENAI",
           allowedModels: ["enabled-model"],
           supportedRoutes: null,
+          models: [],
         },
       ]);
       await expect(
@@ -1249,6 +1250,7 @@ describe("AI gateway control plane", () => {
         provider: "OPENAI",
         allowedModels: null,
         supportedRoutes: null,
+        models: [],
       },
     ]);
 
@@ -2322,6 +2324,61 @@ describe("AI gateway control plane", () => {
         select: { status: true },
       }),
     ).resolves.toEqual({ status: "DISABLED" });
+  });
+
+  it("demotes enabled connections on structural catalog failures but keeps them through timeouts", async () => {
+    const { caller, org } = await prepare();
+    // The private base URL must pass validateLlmConnectionBaseURL; the
+    // whitelist env is machine-dependent, so the test pins it.
+    const originalSegments =
+      env.LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS;
+    Object.assign(env, {
+      LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS: ["10.0.0.0/8"],
+    });
+    const create = (name: string) =>
+      caller.aiGateway.createConnection({
+        orgId: org.id,
+        name,
+        provider: "CUSTOM",
+        baseUrl: "http://10.0.0.1/v1",
+        credential: "",
+      });
+    const broken = await create("broken-host");
+    const slow = await create("slow-host");
+
+    const notFoundFetch = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response("Not found.", {
+        status: 404,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    await new GatewayModelCatalogService(prisma, notFoundFetch).refreshModels({
+      organizationId: org.id,
+      connectionId: broken.id,
+    });
+    expect(
+      await prisma.gatewayAiConnection.findUnique({
+        where: { id: broken.id },
+        select: { status: true },
+      }),
+    ).toEqual({ status: "ERROR" });
+
+    const timeoutFetch = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new Error("connection timed out"));
+    await new GatewayModelCatalogService(prisma, timeoutFetch).refreshModels({
+      organizationId: org.id,
+      connectionId: slow.id,
+    });
+    expect(
+      await prisma.gatewayAiConnection.findUnique({
+        where: { id: slow.id },
+        select: { status: true },
+      }),
+    ).toEqual({ status: "ENABLED" });
+    Object.assign(env, {
+      LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS: originalSegments,
+    });
   });
 
   it("orders connections by creation time", async () => {

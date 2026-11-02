@@ -259,14 +259,18 @@ export class GatewayModelCatalogService {
       fetcher: this.fetcher,
     });
     if (!models.success) {
-      if (models.error === "unauthorized" && connection.status === "ENABLED") {
+      // Structural failures demote an enabled connection: a wrong credential,
+      // a rate limit the host will keep answering, or a /models response no
+      // catalog can be parsed from. A timeout may clear on the next refresh,
+      // so an enabled connection stays enabled through one.
+      const structural =
+        models.error !== "timeout" && connection.status === "ENABLED";
+      if (structural) {
         await this.repository.updateConnectionStatus({
           organizationId: params.organizationId,
           id: connection.id,
           status: "ERROR",
         });
-        // A connection that just failed authorization must stop being handed
-        // to the data plane.
         await invalidateGatewayResolveCacheForOrganization(
           params.organizationId,
         );
