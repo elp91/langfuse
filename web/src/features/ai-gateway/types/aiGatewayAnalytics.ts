@@ -100,4 +100,12 @@ export type AiGatewayEventMap = {
       | { source: "copy_for_agent" }
       | { source: "step_code"; stepNumber: number }
     );
+  "ai_gateway:alias_saved": OrganizationContext & {
+    isUpdate: boolean;
+    targetCount: number;
+  };
+  "ai_gateway:alias_status_changed": OrganizationContext & {
+    status: "ENABLED" | "DISABLED";
+  };
+  "ai_gateway:alias_deleted": OrganizationContext;
 };

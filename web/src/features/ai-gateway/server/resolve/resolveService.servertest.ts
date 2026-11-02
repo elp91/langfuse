@@ -96,6 +96,7 @@ const row = (overrides: {
             deletedAt: null,
           },
     },
+    gatewayAiAliases: [],
     gatewayAiConnections: [
       {
         id: "connection-1",
@@ -196,6 +197,7 @@ describe("GatewayResolveService", () => {
               deletedAt: null,
             },
           },
+          gatewayAiAliases: [],
           gatewayAiConnections: [
             {
               id: "connection-2",
@@ -396,7 +398,11 @@ describe("GatewayResolveService", () => {
           orgId: "org-not-allowed",
           expiresAt: null,
           gatewayAssociation: null,
-          organization: { gatewayConfig: null, gatewayAiConnections: [] },
+          organization: {
+            gatewayConfig: null,
+            gatewayAiConnections: [],
+            gatewayAiAliases: [],
+          },
         }),
       "org-not-allowed",
     );
